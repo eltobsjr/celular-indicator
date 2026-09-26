@@ -114,7 +114,7 @@ Wayland). As proteções agora são:
 | Copiar/colar entre PC e celular | ✅ parcial | automático **enquanto a tela está aberta** (scrcpy); sem sincronizar com a tela fechada |
 | Enviar arquivos | ✅ parcial | seletor → `adb push` para Download; sem arrastar-e-soltar |
 | Fotos recentes | ✅ parcial | "Última foto" copia a mais recente; sem galeria |
-| Notificações | ✅ parcial | lista sob demanda (título/texto); sem responder nem dispensar, sem aviso em tempo real |
+| Notificações | ✅ parcial | lista sob demanda (título/texto) + tempo real opcional (abaixo); sem responder nem dispensar |
 | Controle de mídia | ✅ parcial | anterior/tocar/próxima por keyevent; sem capa/título da música |
 | Emparelhamento por QR com passos numerados | ✅ igual | QR de "Depuração por Wi-Fi" |
 | Tela de erro/desconectado com "Tentar novamente" e dicas (mesmo Wi-Fi, AP isolation, VPN, economia de energia) | ✅ igual | com diagnóstico automático |
