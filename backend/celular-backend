@@ -848,6 +848,7 @@ def main(argv):
             argv.remove("--no-audio")
         else:
             argv.append("--audio")
+        argv += ["--gpu-safe", "--stay-awake"]  # extensão antiga: mesmas proteções da nova
     a = build_parser().parse_args(argv)
     try:
         if a.cmd == "mirror":
