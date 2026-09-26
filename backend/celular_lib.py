@@ -180,6 +180,32 @@ def parse_mdns(text):
     return found
 
 
+def valid_pair_code(code):
+    """Código de pareamento do Android: exatamente 6 dígitos."""
+    return bool(re.fullmatch(r"\d{6}", (code or "").strip()))
+
+
+def normalize_pair_addr(text):
+    """'192.168.1.5:37123' (com espaços/quebras) → 'IP:porta' válido, ou None."""
+    text = (text or "").strip()
+    ip, port = split_addr(text)
+    if not ip or port is None or not 1 <= port <= 65535:
+        return None
+    return text
+
+
+def pick_pairing_service(services, ip_hint=None):
+    """Escolhe, entre os serviços mDNS `_adb-tls-pairing`, o endereço para parear por código.
+
+    Sem `ip_hint` só devolve algo se houver um único candidato (com vários celulares
+    abertos ao mesmo tempo seria chute); com `ip_hint`, o que bater com o IP.
+    """
+    cands = [addr for _name, kind, addr in services if kind.startswith("_adb-tls-pairing")]
+    if ip_hint:
+        cands = [a for a in cands if a.startswith(ip_hint + ":")]
+    return cands[0] if len(set(cands)) == 1 else None
+
+
 def split_addr(addr):
     """'192.168.1.5:37123' → ('192.168.1.5', 37123); IPv6 '[fe80::1]:5555' também."""
     if not addr:
@@ -423,7 +449,7 @@ ERRORS = {
     "mdns_unavailable": ("A descoberta de celulares na rede (mDNS) não está funcionando",
                          "Libere mDNS no firewall: sudo firewall-cmd --add-service=mdns --permanent && sudo firewall-cmd --reload"),
     "never_paired": ("Nenhum celular pareado ainda",
-                     "Use «Parear novo celular (QR code)» e siga os passos no menu."),
+                     "Use «Parear novo celular» e siga os passos no menu."),
     "phone_not_found": ("Celular não encontrado na rede",
                         "No celular: desbloqueie a tela, confira se a «Depuração por Wi-Fi» está ligada e se ele está no mesmo Wi-Fi do PC."),
     "different_network": ("O PC e o celular estão em redes diferentes",
@@ -437,13 +463,19 @@ ERRORS = {
     "vpn_interference": ("Uma VPN pode estar atrapalhando",
                          "Desligue a VPN (Tailscale, WireGuard…) no PC ou no celular e tente de novo."),
     "pairing_revoked": ("O pareamento foi revogado ou expirou",
-                        "Pareie de novo: «Parear novo celular (QR code)». Isso acontece ao «Revogar autorizações» no celular."),
+                        "Pareie de novo: «Parear novo celular». Isso acontece ao «Revogar autorizações» no celular."),
     "unauthorized": ("Falta autorizar este PC no celular",
                      "Olhe o celular: toque em «Permitir» na pergunta «Permitir depuração?». Se não aparecer, pareie de novo."),
     "device_offline": ("O celular aparece como offline para o adb",
                        "Desligue e ligue a Depuração por Wi-Fi no celular e tente de novo."),
     "pair_timeout": ("Ninguém escaneou o QR code a tempo",
                      "Abra «Parear novo celular» de novo e escaneie em até 3 minutos."),
+    "pair_code_invalid": ("O código de pareamento é inválido",
+                         "Digite os 6 números que aparecem no celular em «Parear com código de pareamento» (e, se preencher, o endereço no formato IP:porta)."),
+    "pair_code_timeout": ("O celular não abriu a tela de código a tempo",
+                          "No celular: Depuração por Wi-Fi → «Parear o dispositivo com um código de pareamento» e deixe essa tela aberta. Depois tente de novo."),
+    "pair_code_failed": ("O código de pareamento não foi aceito",
+                         "Confira os 6 números (eles mudam toda vez que a tela do celular é aberta) e o IP:porta mostrado nela. Mantenha a tela de código aberta até terminar."),
     "pair_failed": ("O pareamento falhou",
                     "Tente de novo com o celular desbloqueado e no mesmo Wi-Fi. Se persistir, desligue e ligue a Depuração por Wi-Fi."),
     "connect_failed": ("Pareou, mas não conseguiu conectar",
@@ -514,11 +546,11 @@ def classify_connect(out):
     return False, "connect_failed"
 
 
-def classify_pair(out):
+def classify_pair(out, by_code=False):
     low = out.lower()
     if "successfully paired" in low:
         return None
-    return "pair_failed"
+    return "pair_code_failed" if by_code else "pair_failed"
 
 
 # (padrão em minúsculas, código, fatal?)

@@ -198,6 +198,29 @@ class Classify(unittest.TestCase):
         self.assertIsNone(lib.classify_pair("Successfully paired to 192.168.1.42:40001 [guid=adb-X]"))
         self.assertEqual(lib.classify_pair("Failed: Wrong password or connection was dropped."), "pair_failed")
 
+    def test_pair_by_code(self):
+        self.assertEqual(lib.classify_pair("Failed: Wrong password or connection was dropped.", by_code=True),
+                         "pair_code_failed")
+        self.assertIsNone(lib.classify_pair("Successfully paired to 1.2.3.4:5 [guid=adb-X]", by_code=True))
+
+    def test_pair_code_and_addr_validation(self):
+        self.assertTrue(lib.valid_pair_code("123456"))
+        self.assertTrue(lib.valid_pair_code(" 000123 "))
+        for bad in ("", "12345", "1234567", "12a456", "123 456", None):
+            self.assertFalse(lib.valid_pair_code(bad), bad)
+        self.assertEqual(lib.normalize_pair_addr(" 192.168.1.42:40001 \n"), "192.168.1.42:40001")
+        for bad in ("", "192.168.1.42", "192.168.1.42:0", "192.168.1.42:99999", "a b:1", None):
+            self.assertIsNone(lib.normalize_pair_addr(bad), bad)
+
+    def test_pick_pairing_service(self):
+        one = [("adb-X", "_adb-tls-pairing._tcp", "192.168.1.42:40001"),
+               ("adb-X", "_adb-tls-connect._tcp", "192.168.1.42:37000")]
+        self.assertEqual(lib.pick_pairing_service(one), "192.168.1.42:40001")
+        two = one + [("adb-Y", "_adb-tls-pairing._tcp", "192.168.1.77:41000")]
+        self.assertIsNone(lib.pick_pairing_service(two))  # ambíguo: não chuta
+        self.assertEqual(lib.pick_pairing_service(two, ip_hint="192.168.1.77"), "192.168.1.77:41000")
+        self.assertIsNone(lib.pick_pairing_service([]))
+
     def test_scrcpy_lines(self):
         self.assertEqual(lib.classify_scrcpy_line("ERROR: Could not find any ADB device"), ("device_lost", True))
         self.assertEqual(lib.classify_scrcpy_line("ERROR: Server connection failed"), ("server_connection_failed", True))
@@ -459,6 +482,45 @@ class BackendProcess(FakeEnv):
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=10)
         self.assertFalse(os.path.exists(qr), "QR deve ser apagado ao cancelar")
+
+    def test_mirror_pair_code_discovers_address(self):
+        self._need_lan()
+        self.fake("devices", ONLINE)
+        self.fake("mdns_services", "adb-X\t_adb-tls-pairing._tcp\t192.168.1.42:40001\n")
+        self.fake("pair", "Successfully paired to 192.168.1.42:40001 [guid=adb-X]\n")
+        p, msgs = self.backend("mirror", "--pair-code", "123456",
+                               env={"FAKE_SCRCPY_OUT": "INFO: Renderer: opengl"})
+        self.assertIn("pair 192.168.1.42:40001 123456", self.calls(), p.stdout + p.stderr)
+        self.assertTrue(any(m.get("state") == "mirroring" for m in msgs), msgs)
+        self.assertTrue(lib.load_device().get("paired_at"))
+        with open(os.path.join(lib.state_dir(), "backend.log")) as f:
+            log = f.read()
+        self.assertIn("mirror iniciado", log)
+        self.assertNotIn("123456", log.replace("pair 192.168.1.42:40001", ""))  # código não vai pro log
+
+    def test_mirror_pair_code_with_manual_addr(self):
+        self._need_lan()
+        self.fake("devices", ONLINE)
+        self.fake("pair", "Successfully paired to 10.0.0.9:4444 [guid=adb-X]\n")
+        p, msgs = self.backend("mirror", "--pair-code", "654321", "--pair-addr", "10.0.0.9:4444",
+                               env={"FAKE_SCRCPY_OUT": "INFO: Renderer: opengl"})
+        self.assertIn("pair 10.0.0.9:4444 654321", self.calls(), p.stdout + p.stderr)
+        self.assertFalse(any(c.startswith("mdns") for c in self.calls()))  # não procura se o IP veio
+
+    def test_mirror_pair_code_wrong(self):
+        self._need_lan()
+        self.fake("devices", "List of devices attached\n")
+        self.fake("pair", "Failed: Wrong password or connection was dropped.\n", rc=1)
+        p, msgs = self.backend("mirror", "--pair-code", "111111", "--pair-addr", "10.0.0.9:4444")
+        self.assertEqual(msgs[-1]["code"], "pair_code_failed")
+
+    def test_mirror_pair_code_invalid_never_calls_pair(self):
+        self._need_lan()
+        self.fake("devices", "List of devices attached\n")
+        for code, addr in (("12345", "10.0.0.9:4444"), ("123456", "10.0.0.9")):
+            p, msgs = self.backend("mirror", "--pair-code", code, "--pair-addr", addr)
+            self.assertEqual(msgs[-1]["code"], "pair_code_invalid", (code, addr))
+        self.assertFalse(any(c.startswith("pair") for c in self.calls()))
 
     def test_sigterm_kills_scrcpy(self):
         self._need_lan()

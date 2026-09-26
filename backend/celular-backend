@@ -26,6 +26,7 @@ import json
 import queue
 import os
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -407,6 +408,36 @@ def pair_qr():
     return None, "pair_timeout"
 
 
+def pair_code(code, addr=None):
+    """Pareia com o código de 6 dígitos da tela do celular. Retorna (ip, código_de_erro).
+
+    Sem `addr`, descobre o IP:porta pelo mDNS (a tela de código do celular o anuncia);
+    com `addr`, vai direto.
+    """
+    code = code.strip()
+    if not lib.valid_pair_code(code):
+        return None, "pair_code_invalid"
+    if addr:
+        addr = lib.normalize_pair_addr(addr)
+        if not addr:
+            return None, "pair_code_invalid"
+    else:
+        emit_state("pairing", "Procurando o celular… abra a tela «Parear com código» nele",
+                   timeout=PAIR_TIMEOUT)
+        end = time.monotonic() + PAIR_TIMEOUT
+        while not addr and time.monotonic() < end:
+            addr = lib.pick_pairing_service(lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out))
+            if not addr:
+                time.sleep(1)
+        if not addr:
+            return None, "pair_code_timeout"
+    emit_state("connecting", "Pareando com o código…")
+    res = lib.adb("pair", addr, code, timeout=20)
+    LOG.write(f"adb pair (código) {addr}: {res.out[:200]}")
+    err = "pair_code_failed" if res.timed_out else lib.classify_pair(res.out, by_code=True)
+    return (addr.rsplit(":", 1)[0] if not err else None), err
+
+
 def check_tools():
     adb = lib.adb("version", timeout=5)
     if adb.missing:
@@ -458,6 +489,8 @@ def connect_flow(a, last):
     step(3, "run")
     paired_at = None
     serial = name = addr = None
+    if a.pair_code:
+        a.pair = True
     if not a.pair:
         serial, name, addr, code, saw = find_device(last, a.serial, timeout=a.search_timeout)
         if not serial:
@@ -473,8 +506,11 @@ def connect_flow(a, last):
                 step(3, "fail")
                 raise _Fail(diag, details=details)
     if a.pair:
-        emit_state("pairing", "Preparando o QR code…")
-        ip, code = pair_qr()
+        if a.pair_code:
+            ip, code = pair_code(a.pair_code, a.pair_addr)
+        else:
+            emit_state("pairing", "Preparando o QR code…")
+            ip, code = pair_qr()
         if code:
             step(3, "fail")
             raise _Fail(code)
@@ -558,6 +594,12 @@ def run_scrcpy(a, serial, rec):
     if a.video_driver and a.video_driver != "auto":
         env["SDL_VIDEO_DRIVER"] = a.video_driver
     LOG.write("scrcpy: " + " ".join(cmd), sync=True)
+    # Em pipe o stdout do scrcpy vira buffer de bloco e as linhas «INFO: Renderer/Texture»
+    # só saem quando ele termina — sem elas o backend nunca marca «mirroring» e a extensão
+    # mata o espelhamento por timeout. stdbuf faz exec no scrcpy (mesmo PID).
+    stdbuf = shutil.which("stdbuf")
+    if stdbuf:
+        cmd = [stdbuf, "-oL"] + cmd
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, env=env, preexec_fn=_child_setup)
@@ -601,7 +643,8 @@ def run_scrcpy(a, serial, rec):
 
 def cmd_mirror(a):
     install_handlers(a.memory_limit, a.cpu_limit)
-    LOG.write(f"mirror iniciado: {vars(a)}", sync=True)
+    shown = {k: ("***" if k == "pair_code" and v else v) for k, v in vars(a).items()}
+    LOG.write(f"mirror iniciado: {shown}", sync=True)
     emit_state("searching", "Procurando celular…")
     last = lib.load_device()
     try:
@@ -980,6 +1023,8 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd")
     m = sub.add_parser("mirror")
     m.add_argument("--pair", action="store_true")
+    m.add_argument("--pair-code", help="pareia com o código de 6 dígitos em vez do QR")
+    m.add_argument("--pair-addr", help="IP:porta da tela de código (padrão: descobre por mDNS)")
     m.add_argument("--no-auto-pair", action="store_true")
     m.add_argument("--serial")
     m.add_argument("--app")

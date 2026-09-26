@@ -97,11 +97,32 @@ def pair_qr():
 
 def pair_manual():
     print("\nNo celular: Depuração por Wi-Fi → \"Parear o dispositivo com um código de pareamento\"")
-    addr = input("IP:porta do pareamento: ").strip()
+    print("(deixe essa tela aberta até terminar)")
     code = input("Código de 6 dígitos: ").strip()
+    if not lib.valid_pair_code(code):
+        explain("pair_code_invalid")
+        return None
+    print("Procurando o celular na rede...")
+    addr = None
+    end = time.time() + 8
+    while not addr and time.time() < end:
+        addr = lib.pick_pairing_service(lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out))
+        if not addr:
+            time.sleep(1)
+    if addr:
+        print(f"Celular encontrado em {addr}.")
+    else:
+        addr = lib.normalize_pair_addr(input("IP:porta do pareamento (mostrado no celular): "))
+        if not addr:
+            explain("pair_code_invalid")
+            return None
     res = lib.adb("pair", addr, code, timeout=20)
     print(res.out)
-    return addr.rsplit(":", 1)[0] if not lib.classify_pair(res.out) else None
+    err = lib.classify_pair(res.out, by_code=True)
+    if err:
+        explain(err)
+        return None
+    return addr.rsplit(":", 1)[0]
 
 
 def explain(code):
