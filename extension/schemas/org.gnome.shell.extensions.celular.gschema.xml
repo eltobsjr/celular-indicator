@@ -6,6 +6,13 @@
     <value nick="left-edge"  value="2"/>
   </enum>
 
+  <enum id="org.gnome.shell.extensions.celular.render-driver">
+    <value nick="opengl"     value="0"/>
+    <value nick="opengles2"  value="1"/>
+    <value nick="software"   value="2"/>
+    <value nick="auto"       value="3"/>
+  </enum>
+
   <schema id="org.gnome.shell.extensions.celular"
           path="/org/gnome/shell/extensions/celular/">
 
@@ -14,16 +21,23 @@
       <summary>Posição do indicador na barra superior</summary>
     </key>
 
+    <!-- Espelhamento -->
     <key name="audio" type="b">
-      <default>true</default>
+      <default>false</default>
       <summary>Som do celular no PC</summary>
-      <description>Encaminha o áudio do celular (Android 11+) para o PC. Vale na próxima vez que ligar.</description>
+      <description>Encaminha o áudio do celular (Android 11+) para o PC. Desligado por padrão: menos uma coisa (PipeWire) que pode dar errado. Vale na próxima vez que ligar.</description>
     </key>
 
     <key name="turn-screen-off" type="b">
       <default>false</default>
       <summary>Apagar a tela do celular</summary>
       <description>Mantém a tela do celular apagada enquanto espelha. Vale na próxima vez que ligar.</description>
+    </key>
+
+    <key name="stay-awake" type="b">
+      <default>true</default>
+      <summary>Manter o celular acordado</summary>
+      <description>Impede o celular de bloquear enquanto espelha (só enquanto estiver carregando/conectado).</description>
     </key>
 
     <key name="free-resize" type="b">
@@ -43,9 +57,64 @@
       <summary>Manter a janela sempre no topo</summary>
     </key>
 
+    <!-- Desempenho e segurança -->
+    <key name="max-size" type="i">
+      <range min="0" max="4096"/>
+      <default>1280</default>
+      <summary>Resolução máxima (maior lado, em pixels; 0 = sem limite)</summary>
+    </key>
+
+    <key name="max-fps" type="i">
+      <range min="0" max="120"/>
+      <default>60</default>
+      <summary>Quadros por segundo máximos (0 = sem limite)</summary>
+    </key>
+
+    <key name="bit-rate" type="i">
+      <range min="1" max="64"/>
+      <default>8</default>
+      <summary>Taxa de bits do vídeo (Mbps)</summary>
+    </key>
+
+    <key name="render-driver" enum="org.gnome.shell.extensions.celular.render-driver">
+      <default>'opengl'</default>
+      <summary>Renderizador do vídeo no PC</summary>
+      <description>opengl é o mais testado; software não usa GPU nenhuma (mais CPU, mas não tem como travar driver de vídeo).</description>
+    </key>
+
+    <key name="gpu-safe" type="b">
+      <default>true</default>
+      <summary>Usar só a GPU integrada</summary>
+      <description>Força o scrcpy a usar a GPU integrada via Mesa, sem carregar o driver NVIDIA (proteção contra travamentos em notebooks híbridos).</description>
+    </key>
+
+    <key name="resource-limits" type="b">
+      <default>true</default>
+      <summary>Limitar memória e CPU do espelhamento</summary>
+      <description>Roda o backend/scrcpy num escopo systemd com limite de memória, sem swap e com cota de CPU, além do watchdog.</description>
+    </key>
+
+    <key name="memory-limit" type="i">
+      <range min="256" max="8192"/>
+      <default>1024</default>
+      <summary>Limite de memória do espelhamento (MB)</summary>
+    </key>
+
+    <!-- Conexão -->
+    <key name="auto-reconnect" type="b">
+      <default>false</default>
+      <summary>Reconectar quando o celular voltar à rede</summary>
+      <description>Depois de uma queda de conexão, tenta de novo poucas vezes (15 s, 45 s e 2 min) e quando a rede do PC muda. Nunca fica verificando sem parar.</description>
+    </key>
+
     <key name="show-notifications" type="b">
       <default>true</default>
       <summary>Mostrar notificações de erro</summary>
+    </key>
+
+    <key name="capture-dir" type="s">
+      <default>''</default>
+      <summary>Pasta das capturas e fotos (vazio = Imagens/Celular)</summary>
     </key>
 
   </schema>

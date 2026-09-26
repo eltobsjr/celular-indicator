@@ -1,17 +1,138 @@
-.cel-header-box { spacing: 2px; padding: 4px 8px; }
-.cel-header-title { font-weight: bold; }
-.cel-header-subtitle { font-size: 0.9em; }
-.cel-qr-box { spacing: 8px; padding: 4px 8px; }
-.cel-qr-hint { font-size: 0.85em; color: #6f8396; text-align: center; }
+/* Celular — paleta Catppuccin Macchiato
+   green #a6da95 · yellow #eed49f · red #ed8796 · blue #8aadf4 · lavender #b7bdf8
+   text #cad3f5 · subtext0 #a5adcb · overlay1 #8087a2 · surface0 #363a4f · surface1 #494d64 */
 
-.cel-on { color: #3a944a; }
-.cel-header-subtitle.cel-on { color: #3a944a; }
+/* ---- cores de estado (ícone do painel, pílula, passos) ---- */
+.cel-on { color: #a6da95; }
+.cel-off { color: #8087a2; }
+.cel-pending { color: #eed49f; }
+.cel-error { color: #ed8796; }
 
-.cel-off { color: #6f8396; }
-.cel-header-subtitle.cel-off { color: #6f8396; }
+/* ---- cartão do celular ---- */
+.cel-card-item { padding: 0; }
+.cel-card { padding: 10px 14px 6px; spacing: 6px; }
+.cel-card-top { spacing: 10px; }
 
-.cel-pending { color: #c88800; }
-.cel-header-subtitle.cel-pending { color: #c88800; }
+.cel-card-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background-color: rgba(138, 173, 244, 0.16);
+    color: #8aadf4;
+}
 
-.cel-error { color: #e62d42; }
-.cel-header-subtitle.cel-error { color: #e62d42; }
+.cel-card-name { font-weight: 800; font-size: 1.08em; color: #cad3f5; }
+.cel-card-sub { font-size: 0.82em; color: #a5adcb; }
+.cel-card-seen { font-size: 0.76em; color: #8087a2; }
+
+.cel-pill {
+    font-size: 0.72em;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 100px;
+    background-color: rgba(128, 135, 162, 0.18);
+}
+.cel-pill.cel-on { background-color: rgba(166, 218, 149, 0.18); }
+.cel-pill.cel-pending { background-color: rgba(238, 212, 159, 0.18); }
+.cel-pill.cel-error { background-color: rgba(237, 135, 150, 0.18); }
+
+.cel-card-stats { spacing: 14px; padding-top: 2px; }
+.cel-stat { spacing: 5px; }
+.cel-stat-icon { color: #a5adcb; }
+.cel-stat-label { font-size: 0.84em; font-feature-settings: "tnum"; color: #cad3f5; }
+
+/* ---- botão principal ("Abrir tela do celular") ---- */
+.cel-primary-item { padding: 4px 14px 8px; }
+.cel-primary {
+    padding: 9px 12px;
+    border-radius: 12px;
+    font-weight: 700;
+    color: #24273a;
+    background-color: #8aadf4;
+    transition-duration: 120ms;
+}
+.cel-primary:hover { background-color: #b7bdf8; }
+.cel-primary:focus { box-shadow: inset 0 0 0 2px #cad3f5; }
+.cel-primary:active { background-color: #7a9de4; }
+.cel-primary-active { background-color: #494d64; color: #cad3f5; }
+.cel-primary-active:hover { background-color: #5b6078; }
+.cel-primary-icon { margin-right: 8px; }
+
+/* ---- estado da conexão / diagnóstico ---- */
+.cel-status-item, .cel-onboard-item, .cel-qr-item, .cel-actions-item { padding: 0; }
+.cel-status, .cel-onboard { padding: 4px 14px 8px; spacing: 6px; }
+.cel-section-title { font-weight: 700; font-size: 0.88em; color: #b7bdf8; }
+
+.cel-steps { spacing: 3px; }
+.cel-step { spacing: 8px; }
+.cel-step-num {
+    min-width: 18px;
+    font-size: 0.72em;
+    font-weight: 800;
+    text-align: center;
+    border-radius: 100px;
+    padding: 1px 0;
+    background-color: rgba(128, 135, 162, 0.18);
+    color: #a5adcb;
+}
+.cel-step-num-accent { background-color: rgba(138, 173, 244, 0.2); color: #8aadf4; }
+.cel-step-label { font-size: 0.86em; color: #a5adcb; }
+.cel-step-icon { color: #8087a2; }
+.cel-step-ok .cel-step-icon { color: #a6da95; }
+.cel-step-ok .cel-step-label { color: #cad3f5; }
+.cel-step-run .cel-step-icon { color: #eed49f; }
+.cel-step-run .cel-step-label { color: #eed49f; }
+.cel-step-fail .cel-step-icon { color: #ed8796; }
+.cel-step-fail .cel-step-label { color: #ed8796; }
+
+.cel-error-box {
+    spacing: 3px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background-color: rgba(237, 135, 150, 0.12);
+}
+.cel-error-title { font-weight: 700; color: #ed8796; }
+.cel-error-hint { font-size: 0.86em; color: #cad3f5; }
+.cel-error-detail { font-size: 0.76em; color: #8087a2; }
+
+.cel-btn-row { spacing: 6px; }
+.cel-btn {
+    padding: 5px 8px;
+    border-radius: 8px;
+    font-size: 0.86em;
+    background-color: #363a4f;
+    color: #cad3f5;
+}
+.cel-btn:hover { background-color: #494d64; }
+.cel-btn:focus { box-shadow: inset 0 0 0 2px #8aadf4; }
+
+.cel-note { font-size: 0.78em; color: #8087a2; }
+
+/* ---- QR ---- */
+.cel-qr-box { spacing: 8px; padding: 4px 14px 8px; }
+.cel-qr-frame { padding: 8px; border-radius: 12px; background-color: #ffffff; }
+.cel-qr-hint { font-size: 0.85em; color: #a5adcb; text-align: center; }
+
+/* ---- ações rápidas ---- */
+.cel-actions { padding: 2px 10px 6px; spacing: 4px; }
+.cel-actions-row { spacing: 4px; }
+.cel-action {
+    padding: 6px 2px 4px;
+    border-radius: 10px;
+    background-color: rgba(54, 58, 79, 0.7);
+    color: #cad3f5;
+}
+.cel-action:hover { background-color: #494d64; }
+.cel-action:focus { box-shadow: inset 0 0 0 2px #8aadf4; }
+.cel-action:active { background-color: #5b6078; }
+.cel-action-label { font-size: 0.68em; color: #a5adcb; margin-top: 2px; }
+
+/* ---- listas (notificações / apps) ---- */
+.cel-muted { color: #8087a2; font-style: italic; }
+.cel-notif { padding: 4px 14px; }
+.cel-notif-title { font-weight: 700; font-size: 0.86em; color: #cad3f5; }
+.cel-notif-text { font-size: 0.82em; color: #a5adcb; }
+
+/* largura fixa: textos com quebra de linha precisam de limite, senão o menu estica */
+.cel-card, .cel-status, .cel-onboard, .cel-qr-box, .cel-actions { width: 340px; }
+.cel-notif { width: 312px; }

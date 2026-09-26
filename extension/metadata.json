@@ -1,8 +1,14 @@
 {
   "uuid": "celular@eltobsjr.gmail.com",
   "name": "Celular",
-  "description": "Espelha a tela do celular Android via Wi-Fi (scrcpy) direto da barra superior, com pareamento por QR code.",
-  "version-name": "0.1.0",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "description": "Tela do celular Android no PC via Wi-Fi (scrcpy): cartão com bateria e rede, ações rápidas, envio de arquivos, apps em janela e diagnóstico de conexão, com pareamento por QR code.",
+  "version-name": "0.2.0",
+  "shell-version": [
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
   "settings-schema": "org.gnome.shell.extensions.celular"
 }
