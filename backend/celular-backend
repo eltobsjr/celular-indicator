@@ -23,6 +23,7 @@ import collections
 import ctypes
 import io
 import json
+import queue
 import os
 import random
 import signal
@@ -48,7 +49,9 @@ KEYEVENTS = {
     "back": 4, "home": 3, "recents": 187, "power": 26, "wakeup": 224,
     "volume-up": 24, "volume-down": 25, "mute": 164,
     "play-pause": 85, "next": 87, "previous": 88,
+    "answer": 5, "hangup": 6,
 }
+DND_MODES = {"on": "priority", "priority": "priority", "alarms": "alarms", "none": "none", "off": "off"}
 
 
 class Stopped(Exception):
@@ -727,7 +730,174 @@ def cmd_action(a):
             pass
         emit({"event": "apps", "items": apps})
         return result(name, True)
+    if name == "call":
+        number = lib.clean_number(a.files[0] if a.files else "")
+        if not number:
+            return result(name, False, "Número inválido")
+        res = lib.adb("shell", lib.shell_cmd("am", "start", "-a", "android.intent.action.CALL",
+                                             "-d", f"tel:{number}"), serial=serial, timeout=10)
+        if res.ok and "Error" not in res.out and not lib.permission_denied(res.out):
+            return result(name, True, f"Ligando para {number} — fale pelo celular")
+        # sem permissão de ligar direto: abre o discador já com o número
+        res = lib.adb("shell", lib.shell_cmd("am", "start", "-a", "android.intent.action.DIAL",
+                                             "-d", f"tel:{number}"), serial=serial, timeout=10)
+        return result(name, res.ok, f"Discador aberto no celular com {number} — toque em ligar")
+    if name == "calllog":
+        keys = ["number", "name", "type", "date", "duration"]
+        res = lib.adb("shell", lib.shell_cmd("content", "query", "--uri", "content://call_log/calls",
+                                             "--projection", ":".join(keys), "--sort", "date DESC"),
+                      serial=serial, timeout=15)
+        if lib.permission_denied(res.out):
+            info = lib.error_info("permission_denied")
+            return result(name, False, info["text"], code="permission_denied", hint=info["hint"])
+        rows = lib.parse_content_rows(res.out, keys)[:20]
+        kinds = {"1": "recebida", "2": "feita", "3": "perdida", "5": "recusada", "6": "bloqueada"}
+        items = [{"number": r.get("number", ""), "name": r.get("name", ""),
+                  "kind": kinds.get(r.get("type", ""), ""), "date": int(r.get("date", "0") or 0) // 1000,
+                  "duration": int(r.get("duration", "0") or 0)} for r in rows]
+        emit({"event": "calls", "items": items})
+        return result(name, res.ok)
+    if name == "sms-send":
+        number = lib.clean_number(a.files[0] if a.files else "")
+        body = a.files[1] if len(a.files) > 1 else ""
+        if not number:
+            return result(name, False, "Número inválido")
+        # Abre o app de mensagens já preenchido: o envio é confirmado no celular (o adb
+        # não tem permissão de enviar SMS sozinho sem app no celular).
+        res = lib.adb("shell", lib.shell_cmd("am", "start", "-a", "android.intent.action.SENDTO",
+                                             "-d", f"smsto:{number}", "--es", "sms_body", body,
+                                             "--ez", "exit_on_sent", "true"),
+                      serial=serial, timeout=10)
+        ok = res.ok and "Error" not in res.out
+        return result(name, ok, "Mensagem pronta no celular — toque em Enviar (na tela do celular)"
+                      if ok else "Não foi possível abrir o app de mensagens")
+    if name == "sms-list":
+        keys = ["address", "body", "date", "read"]
+        res = lib.adb("shell", lib.shell_cmd("content", "query", "--uri", "content://sms/inbox",
+                                             "--projection", ":".join(keys), "--sort", "date DESC"),
+                      serial=serial, timeout=15)
+        if lib.permission_denied(res.out) or not res.ok:
+            info = lib.error_info("permission_denied")
+            return result(name, False, info["text"], code="permission_denied", hint=info["hint"])
+        rows = lib.parse_content_rows(res.out, keys)[:20]
+        items = [{"number": r.get("address", ""), "text": r.get("body", "")[:300],
+                  "date": int(r.get("date", "0") or 0) // 1000, "unread": r.get("read") == "0"}
+                 for r in rows]
+        emit({"event": "sms", "items": items})
+        return result(name, True)
+    if name == "dnd":
+        mode = DND_MODES.get(a.files[0] if a.files else "on", "priority")
+        res = lib.adb("shell", lib.shell_cmd("cmd", "notification", "set_dnd", mode),
+                      serial=serial, timeout=8)
+        zen = lib.adb("shell", "settings get global zen_mode", serial=serial, timeout=8).out.strip()
+        applied = (zen == "0") == (mode == "off") and zen in ("0", "1", "2", "3")
+        if applied:
+            try:
+                lib.save_device({"dnd": zen != "0"})
+            except OSError:
+                pass
+            return result(name, True, "Não perturbe ligado no celular" if mode != "off"
+                          else "Não perturbe desligado no celular", dnd=zen != "0")
+        lib.adb("shell", "am start -a android.settings.ZEN_MODE_SETTINGS", serial=serial, timeout=8)
+        return result(name, False, "O celular não aceitou mudar o Não perturbe pelo adb",
+                      hint="Abri a tela de Não perturbe no celular para você mudar lá.", detail=res.out[-200:])
+    if name == "hotspot":
+        for cmd in ("am start -n com.android.settings/.TetherSettings",
+                    "am start -a android.settings.TETHER_SETTINGS",
+                    "am start -a android.settings.WIRELESS_SETTINGS"):
+            res = lib.adb("shell", cmd, serial=serial, timeout=8)
+            if res.ok and "Error" not in res.out:
+                return result(name, True, "Ajustes de ponto de acesso abertos no celular",
+                              hint="Ligue o ponto de acesso lá e conecte o PC pela rede Wi-Fi dele.")
+        return result(name, False, "Não foi possível abrir os ajustes de ponto de acesso")
     return result(name, False, f"Ação desconhecida: {name}")
+
+
+# ----------------------------------------------------------------- tempo real
+
+
+def cmd_watch(a):
+    """Sincronização em tempo real *por evento*: acompanha o buffer de eventos do logcat
+    do celular (notification_enqueue / battery_level) — o processo fica bloqueado lendo,
+    sem polling. Notificação nova → um `dumpsys notification` (com debounce) → avisa só
+    as novas. Termina sozinho quando o celular sai da rede.
+    """
+    install_handlers()
+    serial = online_serial(a.serial, connect=True)
+    if not serial:
+        emit({"event": "offline"})
+        return 1
+    emit({"event": "watching", "serial": serial})
+    LOG.write(f"tempo real: acompanhando {serial}", sync=True)
+
+    def snapshot():
+        res = lib.adb("shell", "dumpsys", "notification", "--noredact", serial=serial, timeout=20)
+        return lib.parse_notifications(res.out, limit=50) if res.ok else []
+
+    labels = {}
+    try:
+        with open(lib.apps_file()) as f:
+            labels = {x["pkg"]: x["label"] for x in json.load(f).get("apps", [])}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    seen = {(n["pkg"], n["title"], n["text"]) for n in snapshot()}
+    cmd = [lib.adb_path(), "-s", serial, "logcat", "-b", "events", "-T", "1", "-v", "brief",
+           "-s", "notification_enqueue", "battery_level"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, env=lib.adb_env(), preexec_fn=_child_setup)
+    RT.child = proc
+    lines = queue.Queue()
+
+    def reader():
+        for raw in io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace"):
+            lines.put(raw)
+        lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    def announce_new():
+        fresh = []
+        for n in snapshot():
+            key = (n["pkg"], n["title"], n["text"])
+            if key not in seen:
+                seen.add(key)
+                n["app"] = labels.get(n["pkg"], n["pkg"].rsplit(".", 1)[-1].capitalize())
+                fresh.append(n)
+        for n in fresh[:5]:
+            emit({"event": "notification", **n})
+
+    pending_at, last_fetch, last_battery = None, 0.0, None
+    while True:
+        # bloqueia até chegar evento; só acorda antes se houver um debounce pendente
+        wait = None
+        if pending_at:
+            wait = max(0.05, max(pending_at, last_fetch + 5) - time.monotonic())
+        try:
+            line = lines.get(timeout=wait)
+        except queue.Empty:
+            line = ""
+        if line is None:
+            if pending_at:
+                announce_new()  # última rajada antes de a conexão cair
+            break
+        ev = lib.parse_event_line(line) if line else None
+        if ev and ev[0] == "battery" and ev[1] != last_battery:
+            last_battery = ev[1]
+            emit({"event": "battery", "level": ev[1]})
+        elif ev and ev[0] == "notification" and ev[1] not in lib._NOISY_PKGS:
+            pending_at = pending_at or time.monotonic() + 1.5  # junta rajadas
+        now = time.monotonic()
+        if pending_at and now >= pending_at and now - last_fetch >= 5:
+            pending_at, last_fetch = None, now
+            announce_new()
+    proc.wait()
+    RT.child = None
+    LOG.write(f"tempo real: logcat terminou ({proc.returncode}) — celular fora da rede?", sync=True)
+    try:
+        lib.save_device({"online": False, "last_seen": int(time.time())})
+    except OSError:
+        pass
+    emit({"event": "offline"})
+    return 0
 
 
 # ----------------------------------------------------------------- diagnóstico
@@ -836,6 +1006,8 @@ def build_parser():
     act.add_argument("--dest")
     act.add_argument("files", nargs="*")
     sub.add_parser("diagnose")
+    w = sub.add_parser("watch")
+    w.add_argument("--serial")
     return p
 
 
@@ -857,6 +1029,8 @@ def main(argv):
             return cmd_action(a)
         if a.cmd == "diagnose":
             return cmd_diagnose(a)
+        if a.cmd == "watch":
+            return cmd_watch(a)
         return 2
     except Stopped as e:
         LOG.write(f"encerrado: {e}", sync=True)

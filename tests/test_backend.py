@@ -501,6 +501,85 @@ class BackendProcess(FakeEnv):
         self.assertEqual(msgs[-1]["code"], "resource_memory")
 
 
+class PhoneFeatures(FakeEnv):
+    """Chamadas, SMS, Não perturbe, ponto de acesso e sincronização em tempo real."""
+
+    def test_parsers(self):
+        rows = lib.parse_content_rows(
+            "Row: 0 address=+5589999, body=Oi, tudo bem?\nlinha 2, date=1727000000000, read=0\n"
+            "Row: 1 address=NULL, body=x, date=1, read=1", ["address", "body", "date", "read"])
+        self.assertEqual(rows[0]["body"], "Oi, tudo bem?\nlinha 2")
+        self.assertEqual(rows[1]["address"], "")
+        self.assertEqual(lib.parse_event_line(
+            "I/notification_enqueue( 1234): [10200,5678,com.whatsapp,1,NULL,0,Notification(x),1]"),
+            ("notification", "com.whatsapp"))
+        self.assertEqual(lib.parse_event_line("09-26 10:00:00.000 1 2 I battery_level: [77,4123,305]"),
+                         ("battery", 77))
+        self.assertIsNone(lib.parse_event_line("--------- beginning of events"))
+        self.assertEqual(lib.clean_number("(89) 9 9436-4683"), "89994364683")
+        self.assertEqual(lib.clean_number("abc; rm -rf"), "")
+        self.assertTrue(lib.permission_denied("Error: java.lang.SecurityException: Permission Denial: opening provider"))
+
+    def test_info_reads_dnd(self):
+        info = lib.parse_info(INFO_OUTPUT.replace("@@end", "@@zen\n1\n@@end"))
+        self.assertTrue(info["dnd"])
+
+    def test_call_and_sms_are_quoted(self):
+        self.fake("devices", ONLINE)
+        p, msgs = self.backend("action", "call", "--", "(89) 9999-0000")
+        self.assertTrue(msgs[-1]["ok"], msgs)
+        self.assertIn("tel:8999990000", " ".join(self.calls()))
+        p, msgs = self.backend("action", "sms-send", "--", "+55 89 9999-0000", "oi; $(reboot) 'x'")
+        self.assertTrue(msgs[-1]["ok"], msgs)
+        call = [c for c in self.calls() if "SENDTO" in c][-1]
+        self.assertIn("'oi; $(reboot) '\"'\"'x'\"'\"''", call)  # texto citado para o sh do celular
+        self.assertIn("smsto:+558999990000", call)
+
+    def test_sms_permission_denied_is_friendly(self):
+        self.fake("devices", ONLINE)
+        self.fake("shell_content", "Error while accessing provider:sms\njava.lang.SecurityException: Permission Denial: reading com.android.providers.telephony.SmsProvider requires android.permission.READ_SMS", rc=1)
+        p, msgs = self.backend("action", "sms-list")
+        self.assertFalse(msgs[-1]["ok"])
+        self.assertEqual(msgs[-1]["code"], "permission_denied")
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_calllog(self):
+        self.fake("devices", ONLINE)
+        self.fake("shell_content", "Row: 0 number=+5589999, name=Maria, type=3, date=1727000000000, duration=0\n")
+        p, msgs = self.backend("action", "calllog")
+        calls = [m for m in msgs if m.get("event") == "calls"][0]["items"]
+        self.assertEqual(calls[0], {"number": "+5589999", "name": "Maria", "kind": "perdida",
+                                    "date": 1727000000, "duration": 0})
+
+    def test_dnd_applied_and_fallback(self):
+        self.fake("devices", ONLINE)
+        self.fake("shell_settings", "1")
+        p, msgs = self.backend("action", "dnd", "--", "on")
+        self.assertTrue(msgs[-1]["ok"])
+        self.assertIn("cmd notification set_dnd priority", " ".join(self.calls()))
+        self.fake("shell_settings", "0")  # celular recusou: continua desligado
+        p, msgs = self.backend("action", "dnd", "--", "on")
+        self.assertFalse(msgs[-1]["ok"])
+        self.assertTrue(any("ZEN_MODE_SETTINGS" in c for c in self.calls()))
+
+    def test_watch_announces_only_new_notifications(self):
+        self.fake("devices", ONLINE)
+        # 1ª leitura (estado inicial) sem a do WhatsApp; 2ª já com ela
+        self.fake("shell_dumpsys.1", NOTIF_OUTPUT.split("    NotificationRecord(0x0a1b")[0])
+        self.fake("shell_dumpsys", NOTIF_OUTPUT)
+        self.fake("logcat", "--------- beginning of events\n"
+                  "I/battery_level( 1234): [76,4100,300]\n"
+                  "I/notification_enqueue( 1234): [10200,5678,com.whatsapp,1,NULL,0,Notification(x),1]\n")
+        p, msgs = self.backend("watch", timeout=30)
+        events = [m.get("event") for m in msgs]
+        self.assertEqual(events[0], "watching")
+        self.assertIn({"event": "battery", "level": 76}, msgs)
+        notes = [m for m in msgs if m.get("event") == "notification"]
+        self.assertEqual([n["pkg"] for n in notes], ["com.whatsapp", "com.google.android.gm"])
+        self.assertEqual(notes[0]["title"], "Maria")
+        self.assertEqual(events[-1], "offline")
+
+
 def _not_zombie(pid):
     try:
         with open(f"/proc/{pid}/stat") as f:

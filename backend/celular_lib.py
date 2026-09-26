@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -257,6 +258,7 @@ INFO_SCRIPT = ";".join([
     "echo @@wifi", "cmd wifi status 2>/dev/null | head -n 30",
     "echo @@power", "dumpsys power | grep -m 2 -E 'mWakefulness=|mIsPowered='",
     "echo @@lowpower", "settings get global low_power",
+    "echo @@zen", "settings get global zen_mode",
     "echo @@end",
 ])
 
@@ -288,6 +290,8 @@ def parse_info(text):
         info["awake"] = m.group(1) == "Awake"
     if val("lowpower") in ("0", "1"):
         info["power_save"] = val("lowpower") == "1"
+    if val("zen") in ("0", "1", "2", "3"):
+        info["dnd"] = val("zen") != "0"  # 1 prioridade, 2 silêncio total, 3 só alarmes
     return {k: v for k, v in info.items() if v != "" and v is not None}
 
 
@@ -347,6 +351,54 @@ def parse_notifications(text, limit=30):
         if len(items) >= limit:
             break
     return items
+
+
+def shell_cmd(*args):
+    """Monta um comando para o `sh` do celular com cada argumento citado (sem injeção)."""
+    return " ".join(shlex.quote(str(a)) for a in args)
+
+
+def clean_number(number):
+    """Telefone só com dígitos, +, * e # (ou '' se não sobrar nada útil)."""
+    n = re.sub(r"[^0-9+*#]", "", number or "")
+    return n if re.search(r"\d", n) else ""
+
+
+def parse_content_rows(text, keys):
+    """Saída de `content query` → [dict]. Valores podem ter vírgulas e quebras de linha."""
+    raws = []
+    for line in text.splitlines():
+        m = re.match(r"^Row: \d+ (.*)$", line)
+        if m:
+            raws.append(m.group(1))
+        elif raws:
+            raws[-1] += "\n" + line  # corpo do SMS com quebra de linha
+    split = re.compile(r", (?=(?:%s)=)" % "|".join(map(re.escape, keys)))
+    rows = []
+    for raw in raws:
+        row = {}
+        for part in split.split(raw):
+            k, sep, v = part.partition("=")
+            if sep:
+                row[k] = "" if v == "NULL" else v
+        rows.append(row)
+    return rows
+
+
+def permission_denied(text):
+    low = text.lower()
+    return "permission denial" in low or "securityexception" in low or "requires android.permission" in low
+
+
+def parse_event_line(line):
+    """Linha de `logcat -b events` → ('notification', pkg) | ('battery', nível) | None."""
+    m = re.search(r"notification_enqueue\b[^:]*:\s*\[\d+,\d+,([\w.]+),", line)
+    if m:
+        return "notification", m.group(1)
+    m = re.search(r"battery_level\b[^:]*:\s*\[(\d+),", line)
+    if m:
+        return "battery", int(m.group(1))
+    return None
 
 
 # ----------------------------------------------------------------- erros
@@ -417,6 +469,8 @@ ERRORS = {
                              "Tente de novo. Se repetir, veja ~/.local/state/celular/backend.log."),
     "too_many_failures": ("Muitas falhas seguidas — pausei as tentativas",
                           "Resolva o problema indicado e tente de novo em 1 minuto."),
+    "permission_denied": ("O Android não deixa o adb ler isso",
+                          "Sem app no celular o adb não tem essa permissão neste aparelho. As mensagens novas continuam aparecendo em «Notificações»."),
     "internal": ("Erro interno do backend", "Veja ~/.local/state/celular/backend.log."),
 }
 

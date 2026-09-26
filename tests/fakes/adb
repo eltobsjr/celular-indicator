@@ -32,6 +32,14 @@ def read(name, default=""):
         return default
 
 
+# sequência: <chave>.1, <chave>.2 … por chamada (se existirem), senão <chave>
+count_file = os.path.join(d, key + ".count")
+n = int(read(key + ".count", "0") or 0) + 1
+with open(count_file, "w") as f:
+    f.write(str(n))
+if os.path.exists(os.path.join(d, f"{key}.{n}")):
+    key = f"{key}.{n}"
+
 delay = read(key + ".sleep").strip()
 if delay:
     time.sleep(float(delay))
