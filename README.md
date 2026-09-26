@@ -82,7 +82,7 @@ O backend classifica o problema e a extensão mostra texto + dica. Os principais
 | `adb_server_failed` / `adb_version_conflict` | Porta 5037 presa ou dois adb de versões diferentes |
 | `server_connection_failed` / `device_lost` / `connection_lost` / `encoder_error` / `video_output_error` / `audio_failed` | Erros do scrcpy traduzidos |
 | `resource_memory` / `resource_cpu` | O watchdog encerrou o espelhamento para proteger o PC |
-| `backend_unresponsive` / `too_many_failures` | O backend travou numa fase, ou falhou 3× seguidas em 60 s (pausa de 60 s) |
+| `backend_unresponsive` / `too_many_failures` | O backend ficou mudo numa fase por 75 s (o scrcpy precisa ser iniciado via `stdbuf`, veja abaixo), ou falhou 3× seguidas em 60 s (pausa de 60 s) |
 
 Log detalhado (sobrevive a um reset forçado, grava com `fsync`):
 `~/.local/state/celular/backend.log`.
@@ -108,6 +108,9 @@ Wayland). As proteções agora são:
   acima de 300 % de CPU por 16 s; registra memória livre e PSI a cada 10 s no log;
   sai sozinho se o gnome-shell morrer (logout) e o scrcpy morre junto com o backend
   (`PR_SET_PDEATHSIG`).
+- **Saída do scrcpy sem buffer** (`stdbuf -oL`): em pipe o scrcpy guarda as linhas
+  `INFO: Renderer/Texture` até sair, e sem elas o backend nunca declara o espelhamento
+  ativo. A extensão então matava tudo após 75 s com «O backend parou de responder».
 - **Anti-laço** e reconexão automática **opcional** com só 3 tentativas
   (15 s, 45 s, 2 min) ou quando a rede do PC muda — nunca polling.
 
