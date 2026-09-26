@@ -47,17 +47,20 @@ const ERRORS = {
     adb_server_failed: ['O servidor do adb não iniciou', 'A porta 5037 pode estar presa por outro adb. Feche o Android Studio/emulador e tente de novo.'],
     adb_version_conflict: ['Dois adb de versões diferentes estão brigando', 'O adb do Android Studio e o do Celular são de versões diferentes. Feche um deles (ou use o mesmo adb nos dois).'],
     mdns_unavailable: ['A descoberta de celulares na rede (mDNS) não está funcionando', 'Libere mDNS no firewall: sudo firewall-cmd --add-service=mdns --permanent && sudo firewall-cmd --reload'],
-    never_paired: ['Nenhum celular pareado ainda', 'Use «Parear novo celular (QR code)» e siga os passos abaixo.'],
+    never_paired: ['Nenhum celular pareado ainda', 'Use «Parear novo celular» (QR code ou código) e siga os passos abaixo.'],
     phone_not_found: ['Celular não encontrado na rede', 'No celular: desbloqueie a tela, confira se a «Depuração por Wi-Fi» está ligada e se ele está no mesmo Wi-Fi do PC.'],
     different_network: ['O PC e o celular estão em redes diferentes', 'Conecte os dois no mesmo Wi-Fi (atenção a redes 2,4 GHz e 5 GHz com nomes diferentes e a redes de visitante).'],
     phone_unreachable: ['O celular não responde na rede', 'Desbloqueie o celular e desligue a economia de energia. Se continuar, o roteador pode estar isolando os aparelhos (AP isolation / rede de visitante).'],
     wifi_debug_off: ['A Depuração por Wi-Fi do celular parece desligada', 'No celular: Opções do desenvolvedor → Depuração por Wi-Fi → ligar. Ela desliga sozinha quando o celular troca de rede.'],
     port_changed: ['O celular mudou de porta/IP', 'Normal depois de reiniciar o celular ou a Depuração por Wi-Fi. Tente de novo com o celular desbloqueado.'],
     vpn_interference: ['Uma VPN pode estar atrapalhando', 'Desligue a VPN (Tailscale, WireGuard…) no PC ou no celular e tente de novo.'],
-    pairing_revoked: ['O pareamento foi revogado ou expirou', 'Pareie de novo: «Parear novo celular (QR code)». Isso acontece ao «Revogar autorizações» no celular.'],
+    pairing_revoked: ['O pareamento foi revogado ou expirou', 'Pareie de novo: «Parear novo celular». Isso acontece ao «Revogar autorizações» no celular.'],
     unauthorized: ['Falta autorizar este PC no celular', 'Olhe o celular: toque em «Permitir» na pergunta «Permitir depuração?». Se não aparecer, pareie de novo.'],
     device_offline: ['O celular aparece como offline para o adb', 'Desligue e ligue a Depuração por Wi-Fi no celular e tente de novo.'],
     pair_timeout: ['Ninguém escaneou o QR code a tempo', 'Abra «Parear novo celular» de novo e escaneie em até 3 minutos.'],
+    pair_code_invalid: ['O código de pareamento é inválido', 'Digite os 6 números que aparecem no celular em «Parear com código de pareamento» (e, se preencher, o endereço no formato IP:porta).'],
+    pair_code_timeout: ['O celular não abriu a tela de código a tempo', 'No celular: Depuração por Wi-Fi → «Parear o dispositivo com um código de pareamento» e deixe essa tela aberta. Depois tente de novo.'],
+    pair_code_failed: ['O código de pareamento não foi aceito', 'Confira os 6 números (eles mudam toda vez que a tela do celular é aberta) e o IP:porta mostrado nela. Mantenha a tela de código aberta até terminar.'],
     pair_failed: ['O pareamento falhou', 'Tente de novo com o celular desbloqueado e no mesmo Wi-Fi. Se persistir, desligue e ligue a Depuração por Wi-Fi.'],
     connect_failed: ['Pareou, mas não conseguiu conectar', 'Mantenha a tela do celular ligada e a Depuração por Wi-Fi ativa, e tente de novo.'],
     device_lost: ['O scrcpy não achou o celular', 'A conexão caiu antes de abrir a tela. Tente de novo com o celular desbloqueado.'],
@@ -103,7 +106,7 @@ const STATE = {
     off: {file: 'off', cls: 'cel-off', label: 'Desligado'},
     searching: {file: 'off', cls: 'cel-pending', label: 'Procurando celular…'},
     connecting: {file: 'off', cls: 'cel-pending', label: 'Conectando…'},
-    pairing: {file: 'off', cls: 'cel-pending', label: 'Escaneie o QR code com o celular'},
+    pairing: {file: 'off', cls: 'cel-pending', label: 'Pareando com o celular'},
     mirroring: {file: 'on', cls: 'cel-on', label: 'Tela do celular aberta'},
     error: {file: 'off', cls: 'cel-error', label: 'Erro'},
 };
@@ -323,6 +326,10 @@ class Controller {
         this.warning = null;
         this.steps = {};
         this.qr = null;
+        this.pairPanel = false; // painel de pareamento aberto no menu
+        this.pairMode = 'qr';   // aba: 'qr' | 'code'
+        this.pairBy = null;     // como a tentativa em andamento pareia: 'qr' | 'code'
+        this._pairOpts = null;  // {code, addr}: só vive até a tentativa terminar
         this.device = null;
         this.online = false;
         this.notifications = null;
@@ -450,8 +457,14 @@ class Controller {
     _mirrorArgs(pair, manual, app) {
         const s = this._settings;
         const a = ['mirror'];
-        if (pair)
+        if (pair) {
             a.push('--pair');
+            if (this._pairOpts?.code) {
+                a.push('--pair-code', this._pairOpts.code);
+                if (this._pairOpts.addr)
+                    a.push('--pair-addr', this._pairOpts.addr);
+            }
+        }
         if (!manual)
             a.push('--no-auto-pair'); // reconexão automática nunca abre QR sozinha
         if (app)
@@ -511,9 +524,30 @@ class Controller {
             this.start();
     }
 
-    start({pair = false, manual = true} = {}) {
+    openPairing(mode = null) {
+        this.pairPanel = true;
+        if (mode)
+            this.pairMode = mode;
+        this._changed('pair-panel');
+    }
+
+    closePairing() {
+        this.pairPanel = false;
+        this._changed();
+    }
+
+    /** Pareia com o código de 6 dígitos da tela «Parear com código» do celular. */
+    startPairCode(code, addr = '') {
+        this.start({pair: true, code, addr});
+    }
+
+    start({pair = false, manual = true, code = null, addr = null} = {}) {
         if (this._destroyed)
             return;
+        this._pairOpts = code ? {code, addr: addr || null} : null;
+        this.pairBy = pair ? (code ? 'code' : 'qr') : null;
+        if (pair)
+            this.pairMode = this.pairBy;
         if (manual) {
             this._retry = 0;
             this._retryTimer = this._clearTimer(this._retryTimer);
@@ -579,6 +613,7 @@ class Controller {
     }
 
     stop() {
+        this._pairOpts = null;
         this._startToken++; // cancela um start() que estava esperando a sessão anterior
         this._pendingTimer = this._clearTimer(this._pendingTimer);
         this._retry = 0;
@@ -637,6 +672,9 @@ class Controller {
             else if (msg.state !== 'pairing')
                 this.qr = null;
             if (msg.state === 'mirroring') {
+                this._pairOpts = null;
+                this.pairBy = null;
+                this.pairPanel = false;
                 this._failures = [];
                 this._retry = 0;
                 if (this.device)
@@ -669,6 +707,7 @@ class Controller {
             return;
         }
 
+        this._pairOpts = null; // o código vale uma vez só: não guarda depois da tentativa
         if (timedOut) {
             this._setError('backend_unresponsive');
         } else if (this.state !== 'error') {
@@ -1121,8 +1160,7 @@ class Indicator extends PanelMenu.Button {
         this._buildCard();
         this._buildPrimary();
         this._buildStatus();
-        this._buildQr();
-        this._buildOnboarding();
+        this._buildPairing();
 
         this._actionsSep = new PopupMenu.PopupSeparatorMenuItem(_('Controles'));
         this.menu.addMenuItem(this._actionsSep);
@@ -1155,8 +1193,9 @@ class Indicator extends PanelMenu.Button {
         this._diagItem.connect('activate', () => this._ctl.diagnose());
         this.menu.addMenuItem(this._diagItem);
 
-        this._pairItem = new PopupMenu.PopupImageMenuItem(_('Parear novo celular (QR code)'), 'list-add-symbolic');
-        this._pairItem.connect('activate', () => this._ctl.start({pair: true}));
+        this._pairItem = new PopupMenu.PopupImageMenuItem(_('Parear novo celular…'), 'list-add-symbolic');
+        // sem emitir 'activate': o menu não fecha, o painel de pareamento abre no lugar
+        this._pairItem.activate = () => this._ctl.openPairing();
         this.menu.addMenuItem(this._pairItem);
 
         this._forgetItem = new PopupMenu.PopupImageMenuItem(_('Esquecer este celular'), 'user-trash-symbolic');
@@ -1282,48 +1321,179 @@ class Indicator extends PanelMenu.Button {
         };
         this._retryBtn = mk(_('Tentar novamente'), () => this._ctl.start());
         this._diagBtn = mk(_('Diagnosticar'), () => this._ctl.diagnose());
-        this._repairBtn = mk(_('Parear de novo'), () => this._ctl.start({pair: true}));
+        this._repairBtn = mk(_('Parear de novo'), () => this._ctl.openPairing());
         col.add_child(btns);
         this._statusItem.add_child(col);
     }
 
-    // ---- QR de pareamento
-    _buildQr() {
-        this._qrItem = this._staticItem('cel-qr-item');
-        const box = new St.BoxLayout({vertical: true, style_class: 'cel-qr-box', x_expand: true});
-        const frame = new St.Bin({style_class: 'cel-qr-frame', x_align: Clutter.ActorAlign.CENTER});
-        this._qrIcon = new St.Icon({icon_size: QR_SIZE});
-        frame.set_child(this._qrIcon);
-        box.add_child(frame);
-        box.add_child(this._label(_('No celular: Opções do desenvolvedor → Depuração por Wi-Fi → «Parear o dispositivo com um QR code» e aponte a câmera aqui.'), 'cel-qr-hint', true));
-        box.add_child(this._label(_('O PC e o celular precisam estar no mesmo Wi-Fi. O QR vale por 3 minutos.'), 'cel-note', true));
-        this._qrItem.add_child(box);
-    }
+    // ---- painel de pareamento: abas «QR code» / «Código», passo a passo e primeira vez
+    _buildPairing() {
+        this._pairItemBox = this._staticItem('cel-pair-item');
+        const col = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'cel-pair'});
 
-    // ---- nunca pareou: passo a passo
-    _buildOnboarding() {
-        this._onboardItem = this._staticItem('cel-onboard-item');
-        const col = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'cel-onboard'});
-        col.add_child(this._label(_('Como conectar seu celular (só na primeira vez)'), 'cel-section-title', true));
-        const steps = [
-            _('No celular, abra Configurações → Sobre o telefone → Informações do software.'),
+        // cabeçalho
+        const head = new St.BoxLayout({style_class: 'cel-pair-head'});
+        head.add_child(new St.Icon({icon_name: 'phone-symbolic', icon_size: 20, style_class: 'cel-pair-badge',
+            y_align: Clutter.ActorAlign.CENTER}));
+        const titles = new St.BoxLayout({vertical: true, x_expand: true, y_align: Clutter.ActorAlign.CENTER});
+        this._pairTitle = this._label(_('Parear celular'), 'cel-pair-title');
+        this._pairSub = this._label(_('Escolha como conectar — leva uns 20 segundos'), 'cel-pair-sub', true);
+        titles.add_child(this._pairTitle);
+        titles.add_child(this._pairSub);
+        head.add_child(titles);
+        this._pairClose = new St.Button({
+            child: new St.Icon({icon_name: 'window-close-symbolic', icon_size: 14}),
+            style_class: 'cel-pair-close', can_focus: true, y_align: Clutter.ActorAlign.START,
+        });
+        this._pairClose.connect('clicked', () => this._ctl.closePairing());
+        head.add_child(this._pairClose);
+        col.add_child(head);
+
+        // primeira vez: como ligar a Depuração por Wi-Fi
+        this._firstBox = new St.BoxLayout({vertical: true, style_class: 'cel-first'});
+        this._firstBox.add_child(this._label(_('Primeira vez? Ligue a Depuração por Wi-Fi'), 'cel-first-title', true));
+        [
+            _('Configurações → Sobre o telefone → Informações do software.'),
             _('Toque 7 vezes em «Número da versão» até aparecer «Modo de desenvolvedor ativado».'),
             _('Volte e abra Opções do desenvolvedor → ligue a «Depuração por Wi-Fi».'),
-            _('Toque em «Depuração por Wi-Fi» → «Parear o dispositivo com um QR code».'),
-            _('Aqui no PC, clique em «Parear novo celular» e aponte a câmera para o QR.'),
-        ];
-        steps.forEach((text, i) => {
-            const row = new St.BoxLayout({style_class: 'cel-step'});
-            row.add_child(new St.Label({text: String(i + 1), style_class: 'cel-step-num cel-step-num-accent', y_align: Clutter.ActorAlign.START}));
-            row.add_child(this._label(text, 'cel-step-label', true));
-            col.add_child(row);
+        ].forEach((text, i) => this._firstBox.add_child(this._stepRow(i + 1, text)));
+        col.add_child(this._firstBox);
+
+        // abas
+        const tabs = new St.BoxLayout({style_class: 'cel-tabs'});
+        this._tabs = {};
+        for (const [mode, label, icon] of [['qr', _('QR code'), 'view-grid-symbolic'],
+            ['code', _('Código'), 'input-keyboard-symbolic']]) {
+            const btn = new St.Button({style_class: 'cel-tab', x_expand: true, can_focus: true});
+            const row = new St.BoxLayout({x_align: Clutter.ActorAlign.CENTER});
+            row.add_child(new St.Icon({icon_name: icon, icon_size: 14, style_class: 'cel-tab-icon'}));
+            row.add_child(new St.Label({text: label, y_align: Clutter.ActorAlign.CENTER}));
+            btn.set_child(row);
+            btn.connect('clicked', () => {
+                if (!this._ctl.running)
+                    this._ctl.openPairing(mode);
+            });
+            tabs.add_child(btn);
+            this._tabs[mode] = btn;
+        }
+        col.add_child(tabs);
+
+        // ---- aba QR
+        this._qrPage = new St.BoxLayout({vertical: true, style_class: 'cel-page'});
+        this._qrPage.add_child(this._stepRow(1, _('No celular, abra Depuração por Wi-Fi → «Parear o dispositivo com um QR code».')));
+        this._qrPage.add_child(this._stepRow(2, _('Aponte a câmera para o QR code abaixo.')));
+        this._qrFrame = new St.Bin({style_class: 'cel-qr-frame', x_align: Clutter.ActorAlign.CENTER});
+        this._qrIcon = new St.Icon({icon_size: QR_SIZE});
+        this._qrFrame.set_child(this._qrIcon);
+        this._qrPage.add_child(this._qrFrame);
+        this._qrWait = this._label('', 'cel-wait', true);
+        this._qrPage.add_child(this._qrWait);
+        this._qrGo = this._pairButton(_('Gerar QR code'), 'view-refresh-symbolic', () => this._ctl.start({pair: true}));
+        this._qrPage.add_child(this._qrGo);
+        col.add_child(this._qrPage);
+
+        // ---- aba Código
+        this._codePage = new St.BoxLayout({vertical: true, style_class: 'cel-page'});
+        this._codePage.add_child(this._stepRow(1, _('No celular, abra Depuração por Wi-Fi → «Parear o dispositivo com um código de pareamento».')));
+        this._codePage.add_child(this._stepRow(2, _('Digite aqui os 6 números que aparecem lá e deixe aquela tela aberta.')));
+        this._codeForm = new St.BoxLayout({vertical: true, style_class: 'cel-code-form'});
+        this._codeEntry = new St.Entry({
+            hint_text: '000000', style_class: 'cel-code-entry', can_focus: true, x_expand: true,
         });
-        col.add_child(this._label(_('O PC e o celular precisam estar na mesma rede Wi-Fi. Depois disso, é só clicar em «Abrir tela do celular».'), 'cel-note', true));
-        const btn = new St.Button({label: _('Parear novo celular (QR code)'), style_class: 'cel-primary', x_expand: true, can_focus: true});
-        btn.connect('clicked', () => this._ctl.start({pair: true}));
-        col.add_child(btn);
-        this._onboardItem.add_child(col);
+        this._codeEntry.clutter_text.set_max_length(7);
+        this._codeEntry.clutter_text.connect('text-changed', () => this._onCodeChanged());
+        this._codeEntry.clutter_text.connect('activate', () => this._submitCode());
+        this._codeForm.add_child(this._codeEntry);
+        this._addrToggle = new St.Button({
+            label: _('Informar IP:porta manualmente'), style_class: 'cel-link', can_focus: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._addrToggle.connect('clicked', () => {
+            this._addrEntry.visible = !this._addrEntry.visible;
+            if (this._addrEntry.visible)
+                this._addrEntry.grab_key_focus();
+        });
+        this._codeForm.add_child(this._addrToggle);
+        this._addrEntry = new St.Entry({
+            hint_text: '192.168.0.10:37123', style_class: 'cel-addr-entry', can_focus: true, x_expand: true,
+            visible: false,
+        });
+        this._addrEntry.clutter_text.connect('activate', () => this._submitCode());
+        this._codeForm.add_child(this._addrEntry);
+        this._codeError = this._label('', 'cel-form-error', true);
+        this._codeError.visible = false;
+        this._codeForm.add_child(this._codeError);
+        this._codeGo = this._pairButton(_('Parear com o código'), 'emblem-ok-symbolic', () => this._submitCode());
+        this._codeForm.add_child(this._codeGo);
+        this._codePage.add_child(this._codeForm);
+        this._codeWait = this._label('', 'cel-wait', true);
+        this._codePage.add_child(this._codeWait);
+        col.add_child(this._codePage);
+
+        this._pairCancel = this._pairButton(_('Cancelar'), 'process-stop-symbolic', () => this._ctl.stop(), true);
+        col.add_child(this._pairCancel);
+        col.add_child(this._label(_('O PC e o celular precisam estar no mesmo Wi-Fi. Só é preciso parear uma vez.'), 'cel-note', true));
+        this._pairItemBox.add_child(col);
     }
+
+    _stepRow(n, text) {
+        const row = new St.BoxLayout({style_class: 'cel-step'});
+        row.add_child(new St.Label({text: String(n), style_class: 'cel-step-num cel-step-num-accent',
+            y_align: Clutter.ActorAlign.START}));
+        row.add_child(this._label(text, 'cel-step-label', true));
+        return row;
+    }
+
+    _pairButton(label, icon, cb, secondary = false) {
+        const btn = new St.Button({
+            style_class: secondary ? 'cel-btn cel-pair-cancel' : 'cel-primary cel-pair-go',
+            x_expand: true, can_focus: true,
+        });
+        const row = new St.BoxLayout({x_align: Clutter.ActorAlign.CENTER});
+        row.add_child(new St.Icon({icon_name: icon, icon_size: 16, style_class: 'cel-primary-icon'}));
+        row.add_child(new St.Label({text: label, y_align: Clutter.ActorAlign.CENTER}));
+        btn.set_child(row);
+        btn.connect('clicked', cb);
+        return btn;
+    }
+
+    _codeDigits() {
+        return this._codeEntry.text.replace(/\D/g, '');
+    }
+
+    _onCodeChanged() {
+        // só dígitos, no máximo 6 (aceita colar «123 456»); mostra em grupos de 3
+        const d = this._codeDigits().slice(0, 6);
+        const shown = d.length > 3 ? `${d.slice(0, 3)} ${d.slice(3)}` : d;
+        if (this._codeEntry.text !== shown)
+            this._codeEntry.text = shown;
+        this._codeError.visible = false;
+        this._codeGo.reactive = d.length === 6;
+        this._codeGo.opacity = d.length === 6 ? 255 : 130;
+    }
+
+    _submitCode() {
+        if (this._ctl.running)
+            return;
+        const code = this._codeDigits();
+        const addr = this._addrEntry.visible ? this._addrEntry.text.trim() : '';
+        let problem = '';
+        if (code.length !== 6)
+            problem = _('O código tem 6 números.');
+        else if (addr && !/^(\[[0-9a-fA-F:.%a-z]+\]|[0-9a-zA-Z.-]+):\d{1,5}$/.test(addr))
+            problem = _('O endereço deve estar no formato IP:porta, como 192.168.0.10:37123.');
+        if (problem) {
+            this._codeError.text = problem;
+            this._codeError.visible = true;
+            return;
+        }
+        // o código não fica na tela nem na memória do menu depois de enviado
+        this._codeEntry.text = '';
+        this._addrEntry.text = '';
+        this._ctl.startPairCode(code, addr);
+    }
+
+    // ---- nunca pareou / botão «Parear novo celular»: o mesmo painel (ver _buildPairing)
 
     // ---- ações rápidas (adb): navegação, tela, volume, câmera, captura, mídia
     _buildQuickActions() {
@@ -1693,7 +1863,7 @@ class Indicator extends PanelMenu.Button {
             ].filter(Boolean).join(' · ');
         } else {
             this._cardName.text = _('Nenhum celular pareado');
-            this._cardSub.text = _('Pareie uma vez por QR code');
+            this._cardSub.text = _('Pareie uma vez por QR code ou código');
         }
         let pill = '';
         let pillCls = 'cel-off';
@@ -1798,26 +1968,14 @@ class Indicator extends PanelMenu.Button {
         const errCode = err?.code;
         this._retryBtn.visible = c.state === 'error' && errCode !== 'never_paired';
         this._repairBtn.visible = c.state === 'error' && ['pairing_revoked', 'unauthorized', 'never_paired',
-            'pair_failed', 'pair_timeout', 'connect_failed', 'wifi_debug_off', 'port_changed'].includes(errCode);
+            'pair_failed', 'pair_timeout', 'pair_code_failed', 'pair_code_timeout', 'pair_code_invalid', 'connect_failed', 'wifi_debug_off', 'port_changed'].includes(errCode);
         this._diagBtn.visible = c.state === 'error' && !c.busy.has('diagnose');
         this._statusTitle.text = diag?.items?.length && !showSteps ? _('Diagnóstico') : _('Estado da conexão');
         this._statusItem.visible = showSteps || Boolean(err) || Boolean(diag?.items?.length) ||
             c.busy.has('diagnose');
 
-        // QR
-        if (c.qr) {
-            if (this._qrPath !== c.qr) {
-                this._qrPath = c.qr;
-                this._qrIcon.gicon = new Gio.FileIcon({file: Gio.File.new_for_path(c.qr)});
-            }
-        } else if (this._qrPath) {
-            this._qrPath = null;
-            this._qrIcon.gicon = null;
-        }
-        this._qrItem.visible = Boolean(c.qr);
-
-        // onboarding (nunca pareou)
-        this._onboardItem.visible = neverPaired;
+        // painel de pareamento (QR / código / primeira vez)
+        this._syncPairing(c, neverPaired);
 
         // controles só com celular conhecido
         const canAct = Boolean(dev);
@@ -1828,7 +1986,7 @@ class Indicator extends PanelMenu.Button {
         this._dndItem.setToggleState(Boolean(dev?.dnd));
         this._syncing = false;
         this._forgetItem.visible = Boolean(dev);
-        this._pairItem.visible = Boolean(dev) && !c.running;
+        this._pairItem.visible = Boolean(dev) && !c.running && !c.pairPanel;
         this._diagItem.visible = !c.running;
 
         // Listas só são refeitas quando os dados delas mudam (nunca a cada sync): refazer
@@ -1843,6 +2001,60 @@ class Indicator extends PanelMenu.Button {
             this._fillSms();
         if (reason === 'qr')
             this._openForQr();
+        if (reason === 'pair-panel' && this._ctl.pairMode === 'code' && !this._ctl.running)
+            this._codeEntry.grab_key_focus();
+    }
+
+    _syncPairing(c, neverPaired) {
+        const pairing = c.state === 'pairing' || (c.running && c.pairBy);
+        const show = neverPaired || c.pairPanel || pairing;
+        this._pairItemBox.visible = show;
+        if (!show) {
+            if (this._qrPath) {
+                this._qrPath = null;
+                this._qrIcon.gicon = null;
+            }
+            return;
+        }
+        const mode = pairing && c.pairBy ? c.pairBy : c.pairMode;
+        const running = c.running;
+
+        this._pairClose.visible = !neverPaired && !running;
+        this._firstBox.visible = neverPaired && !running;
+        this._pairTitle.text = neverPaired ? _('Conecte seu celular') : _('Parear novo celular');
+        for (const [m, btn] of Object.entries(this._tabs)) {
+            btn.style_class = `cel-tab${m === mode ? ' cel-tab-on' : ''}`;
+            btn.reactive = !running;
+        }
+        this._qrPage.visible = mode === 'qr';
+        this._codePage.visible = mode === 'code';
+
+        // QR: a imagem aparece assim que o backend gera; enquanto isso, mensagem de espera
+        if (c.qr && this._qrPath !== c.qr) {
+            this._qrPath = c.qr;
+            this._qrIcon.gicon = new Gio.FileIcon({file: Gio.File.new_for_path(c.qr)});
+        } else if (!c.qr && this._qrPath) {
+            this._qrPath = null;
+            this._qrIcon.gicon = null;
+        }
+        this._qrFrame.visible = Boolean(c.qr);
+        this._qrWait.visible = mode === 'qr' && running && !c.qr;
+        this._qrWait.text = _('Preparando o QR code…');
+        this._qrGo.visible = !running;
+        this._qrGo.get_child().get_last_child().text = c.error?.code?.startsWith('pair') ? _('Gerar outro QR code') : _('Gerar QR code');
+
+        // Código: formulário some enquanto pareia; no lugar, o que está acontecendo
+        this._codeForm.visible = !running;
+        this._codeWait.visible = mode === 'code' && running;
+        this._codeWait.text = c.state === 'connecting'
+            ? _('Pareando com o código…')
+            : _('Procurando o celular na rede… mantenha a tela «Parear com código» aberta nele.');
+        this._pairCancel.visible = running;
+        this._pairSub.text = running
+            ? _('Aguardando o celular — não feche a tela de pareamento nele.')
+            : (mode === 'code' ? _('Sem câmera? Digite o código de 6 números do celular.')
+                : _('Aponte a câmera do celular e pronto.'));
+        this._codeGo.reactive = this._codeDigits().length === 6;
     }
 
     // O QR precisa de atenção: abre o menu — mas só se for seguro (sem tela bloqueada,

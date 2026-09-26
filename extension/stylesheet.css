@@ -59,8 +59,8 @@
 .cel-primary-icon { margin-right: 8px; }
 
 /* ---- estado da conexão / diagnóstico ---- */
-.cel-status-item, .cel-onboard-item, .cel-qr-item, .cel-actions-item { padding: 0; }
-.cel-status, .cel-onboard { padding: 4px 14px 8px; spacing: 6px; }
+.cel-status-item, .cel-actions-item { padding: 0; }
+.cel-status { padding: 4px 14px 8px; spacing: 6px; }
 .cel-section-title { font-weight: 700; font-size: 0.88em; color: #b7bdf8; }
 
 .cel-steps { spacing: 3px; }
@@ -108,10 +108,89 @@
 
 .cel-note { font-size: 0.78em; color: #8087a2; }
 
-/* ---- QR ---- */
-.cel-qr-box { spacing: 8px; padding: 4px 14px 8px; }
-.cel-qr-frame { padding: 8px; border-radius: 12px; background-color: #ffffff; }
-.cel-qr-hint { font-size: 0.85em; color: #a5adcb; text-align: center; }
+/* ---- painel de pareamento ---- */
+.cel-pair-item { padding: 0; }
+.cel-pair { padding: 8px 14px 10px; spacing: 8px; width: 340px; }
+.cel-pair-head { spacing: 10px; }
+.cel-pair-badge {
+    padding: 8px;
+    border-radius: 12px;
+    background-color: rgba(138, 173, 244, 0.16);
+    color: #8aadf4;
+}
+.cel-pair-title { font-weight: 800; font-size: 1.05em; color: #cad3f5; }
+.cel-pair-sub { font-size: 0.8em; color: #a5adcb; }
+.cel-pair-close { padding: 4px; border-radius: 100px; color: #8087a2; }
+.cel-pair-close:hover { background-color: #363a4f; color: #cad3f5; }
+.cel-pair-close:focus { box-shadow: inset 0 0 0 2px #8aadf4; }
+
+.cel-first {
+    spacing: 4px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background-color: rgba(238, 212, 159, 0.10);
+}
+.cel-first-title { font-weight: 700; font-size: 0.84em; color: #eed49f; }
+
+/* abas segmentadas */
+.cel-tabs { padding: 3px; spacing: 3px; border-radius: 12px; background-color: #1e2030; }
+.cel-tab {
+    padding: 6px 8px;
+    border-radius: 9px;
+    font-size: 0.88em;
+    font-weight: 700;
+    color: #a5adcb;
+    transition-duration: 120ms;
+}
+.cel-tab:hover { background-color: rgba(73, 77, 100, 0.6); color: #cad3f5; }
+.cel-tab:focus { box-shadow: inset 0 0 0 2px #8aadf4; }
+.cel-tab-on, .cel-tab-on:hover { background-color: #494d64; color: #cad3f5; }
+.cel-tab-icon { margin-right: 6px; }
+
+.cel-page { spacing: 6px; }
+.cel-qr-frame { padding: 10px; border-radius: 16px; background-color: #ffffff; }
+.cel-wait {
+    padding: 8px 10px;
+    border-radius: 10px;
+    font-size: 0.86em;
+    text-align: center;
+    color: #eed49f;
+    background-color: rgba(238, 212, 159, 0.10);
+}
+
+.cel-code-form { spacing: 6px; padding-top: 2px; }
+.cel-code-entry {
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 2px solid transparent;
+    font-size: 1.7em;
+    font-weight: 800;
+    letter-spacing: 5px;
+    color: #cad3f5;
+    background-color: #1e2030;
+    caret-color: #8aadf4;
+    selection-background-color: #8aadf4;
+    selected-color: #24273a;
+}
+.cel-code-entry:focus { border-color: #8aadf4; }
+.cel-addr-entry {
+    padding: 7px 10px;
+    border-radius: 10px;
+    border: 2px solid transparent;
+    font-size: 0.92em;
+    color: #cad3f5;
+    background-color: #1e2030;
+    caret-color: #8aadf4;
+}
+.cel-addr-entry:focus { border-color: #8aadf4; }
+.cel-code-entry StLabel.hint-text, .cel-addr-entry StLabel.hint-text { color: #5b6078; }
+.cel-link { font-size: 0.8em; color: #8aadf4; padding: 0 2px; }
+.cel-link:hover { color: #b7bdf8; }
+.cel-link:focus { text-decoration: underline; }
+.cel-form-error { font-size: 0.82em; color: #ed8796; }
+.cel-pair-go { margin-top: 2px; }
+.cel-pair-go:insensitive { background-color: #363a4f; color: #8087a2; }
+.cel-pair-cancel { padding: 8px 12px; border-radius: 12px; font-weight: 700; }
 
 /* ---- ações rápidas ---- */
 .cel-actions { padding: 2px 10px 6px; spacing: 4px; }
@@ -134,5 +213,5 @@
 .cel-notif-text { font-size: 0.82em; color: #a5adcb; }
 
 /* largura fixa: textos com quebra de linha precisam de limite, senão o menu estica */
-.cel-card, .cel-status, .cel-onboard, .cel-qr-box, .cel-actions { width: 340px; }
+.cel-card, .cel-status, .cel-actions { width: 340px; }
 .cel-notif { width: 312px; }
