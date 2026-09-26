@@ -1,106 +1,879 @@
 #!/usr/bin/env python3
-"""Backend leve da extensão 'celular': acha (ou pareia por QR) o celular e vira o scrcpy.
+"""Backend da extensão 'celular'. Fala com a extensão por linhas JSON no stdout.
 
-Fala com a extensão por linhas JSON no stdout. Depois de conectar, se substitui pelo
-scrcpy (exec), então não sobra nenhum processo Python enquanto o espelhamento roda.
-Opções: --pair (força QR) e as flags de scrcpy --no-audio, --turn-screen-off,
---no-window-aspect-ratio-lock, --fullscreen, --always-on-top. SIGTERM cancela.
+Subcomandos:
+  mirror [opções]        acha (ou pareia por QR) o celular e roda o scrcpy como filho,
+                         traduzindo os erros dele; um watchdog encerra o scrcpy se ele
+                         passar dos limites de memória/CPU ou se a extensão morrer.
+  action NOME [opções]   ações curtas via adb (voltar, início, captura, enviar arquivo…)
+  diagnose               verifica PC, rede, adb e celular e explica o que está errado
+
+Mensagens (uma por linha):
+  {"state": "searching|connecting|pairing|mirroring|stopped|error", "text", "code", "hint", ...}
+  {"event": "step", "step": 1..5, "status": "run|ok|fail|skip", "text": ...}
+  {"event": "device", "device": {...}}   {"event": "warning", "code", "text", "hint"}
+  {"event": "result", "action", "ok", ...}   {"event": "diagnosis", "items": [...], ...}
+
+Nunca deixa traceback escapar: qualquer exceção vira {"state":"error","code":"internal"}.
+Log persistente (com fsync) em ~/.local/state/celular/backend.log — ajuda a entender um
+travamento da máquina, já que o journal perde os últimos minutos num reset forçado.
 """
-import importlib.machinery
-import importlib.util
+import argparse
+import collections
+import ctypes
+import io
 import json
 import os
 import random
 import signal
+import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-_loader = importlib.machinery.SourceFileLoader("celular_cli", os.path.join(HERE, "celular"))
-_spec = importlib.util.spec_from_loader("celular_cli", _loader)
-cli = importlib.util.module_from_spec(_spec)
-_loader.exec_module(cli)  # reaproveita adb(), devices(), mdns_services()
+sys.path.insert(0, HERE)
+import celular_lib as lib  # noqa: E402
 
-QR_PATH = None
+PAIR_TIMEOUT = 180
+SEARCH_TIMEOUT = 15
+STEPS = {
+    1: "Verificando a rede do PC",
+    2: "Iniciando o adb",
+    3: "Procurando o celular na rede",
+    4: "Conectando ao celular",
+    5: "Abrindo a tela do celular",
+}
+KEYEVENTS = {
+    "back": 4, "home": 3, "recents": 187, "power": 26, "wakeup": 224,
+    "volume-up": 24, "volume-down": 25, "mute": 164,
+    "play-pause": 85, "next": 87, "previous": 88,
+}
 
 
-def emit(state, text="", **extra):
-    print(json.dumps({"state": state, "text": text, **extra}, ensure_ascii=False), flush=True)
+class Stopped(Exception):
+    pass
+
+
+# ----------------------------------------------------------------- log
+
+
+class Log:
+    MAX = 1024 * 1024
+
+    def __init__(self):
+        self.f = None
+        self.lock = threading.Lock()
+        try:
+            path = os.path.join(lib.state_dir(), "backend.log")
+            if os.path.exists(path) and os.path.getsize(path) > self.MAX:
+                os.replace(path, path + ".1")
+            self.f = open(path, "a", buffering=1, encoding="utf-8")
+        except OSError:
+            self.f = None
+
+    def write(self, msg, sync=False):
+        if not self.f:
+            return
+        with self.lock:
+            try:
+                self.f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + f"[{os.getpid()}] {msg}\n")
+                if sync:
+                    self.f.flush()
+                    os.fsync(self.f.fileno())
+            except (OSError, ValueError):
+                pass
+
+    def sync(self):
+        if self.f:
+            with self.lock:
+                try:
+                    self.f.flush()
+                    os.fsync(self.f.fileno())
+                except (OSError, ValueError):
+                    pass
+
+
+LOG = Log()
+
+
+# ----------------------------------------------------------------- saída
+
+
+class Runtime:
+    def __init__(self):
+        self.stopping = False
+        self.stop_at = None
+        self.child = None
+        self.killed_reason = None
+        self.qr_path = None
+        self.pipe_broken = False
+
+
+RT = Runtime()
+
+
+def emit(obj):
+    if RT.pipe_broken:
+        return
+    try:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        # a extensão sumiu: não adianta continuar
+        RT.pipe_broken = True
+        LOG.write("stdout fechado — encerrando", sync=True)
+        if not RT.stopping:
+            RT.stopping = True
+            RT.stop_at = time.monotonic()
+            raise Stopped("pipe")
+
+
+def emit_state(state, text="", **extra):
+    LOG.write(f"estado {state} {text} {extra.get('code', '')}", sync=True)
+    emit({"state": state, "text": text, **extra})
+
+
+def emit_error(code, text=None, hint=None, detail=None, **extra):
+    info = lib.error_info(code, text, hint)
+    if detail:
+        extra["detail"] = detail
+    emit_state("error", info["text"], code=info["code"], hint=info["hint"], **extra)
+    return 1
+
+
+def emit_warning(code, text=None, hint=None):
+    info = lib.error_info(code, text, hint)
+    LOG.write(f"aviso {code}")
+    emit({"event": "warning", **info})
+
+
+def step(n, status, text=None):
+    emit({"event": "step", "step": n, "status": status, "text": text or STEPS[n]})
+
+
+# ----------------------------------------------------------------- sinais / watchdog
+
+
+def on_signal(signum, _frame):
+    if RT.stopping:
+        return
+    RT.stopping = True
+    RT.stop_at = time.monotonic()
+    LOG.write(f"sinal {signum} recebido — encerrando", sync=True)
+    raise Stopped(f"sinal {signum}")
+
+
+try:
+    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+except OSError:
+    _LIBC = None
+
+
+def _child_setup():
+    # Se o backend morrer (até por SIGKILL), o kernel manda SIGTERM ao scrcpy.
+    if _LIBC is not None:
+        _LIBC.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+
+
+def terminate_child(proc, grace=3.0):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+
+    def _kill():
+        if proc.poll() is None:
+            LOG.write("scrcpy não saiu com SIGTERM — SIGKILL", sync=True)
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    t = threading.Timer(grace, _kill)
+    t.daemon = True
+    t.start()
+
+
+def _read_proc(pid):
+    rss = cpu = None
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = int(line.split()[1])  # kB
+                    break
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+            cpu = int(fields[11]) + int(fields[12])  # utime + stime
+    except (OSError, ValueError, IndexError):
+        pass
+    return rss, cpu
+
+
+def _system_pressure():
+    avail = psi = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) // 1024
+                    break
+        with open("/proc/pressure/memory") as f:
+            psi = f.readline().split()[1]  # avg10 de "some"
+    except (OSError, ValueError, IndexError):
+        pass
+    return avail, psi
+
+
+def watchdog(mem_limit_mb, cpu_limit):
+    """Thread: pai morto → encerra; scrcpy acima do limite → mata; stop travado → _exit."""
+    ppid0 = os.getppid()
+    clk = os.sysconf("SC_CLK_TCK")
+    last_cpu, hot, tick = None, 0, 0
+    while True:
+        time.sleep(2)
+        tick += 1
+        if RT.stop_at and time.monotonic() - RT.stop_at > 6:
+            LOG.write("encerramento travado — saindo à força", sync=True)
+            if RT.child and RT.child.poll() is None:
+                try:
+                    RT.child.kill()
+                except OSError:
+                    pass
+            os._exit(3)
+        if os.getppid() != ppid0 and not RT.stopping:
+            LOG.write("processo pai (gnome-shell) sumiu — encerrando", sync=True)
+            os.kill(os.getpid(), signal.SIGTERM)
+            continue
+        child = RT.child
+        if not child or child.poll() is not None:
+            last_cpu, hot = None, 0
+            continue
+        rss, cpu = _read_proc(child.pid)
+        if rss is not None and mem_limit_mb and rss > mem_limit_mb * 1024 and not RT.killed_reason:
+            RT.killed_reason = "resource_memory"
+            LOG.write(f"scrcpy passou do limite de memória ({rss // 1024} MB) — encerrando", sync=True)
+            terminate_child(child, grace=2)
+        if cpu is not None and last_cpu is not None and cpu_limit:
+            usage = (cpu - last_cpu) / clk / 2.0
+            hot = hot + 1 if usage > cpu_limit else 0
+            if hot >= 8 and not RT.killed_reason:  # ~16 s seguidos acima do limite
+                RT.killed_reason = "resource_cpu"
+                LOG.write(f"scrcpy acima de {cpu_limit * 100:.0f}% de CPU por 16 s — encerrando", sync=True)
+                terminate_child(child, grace=2)
+        last_cpu = cpu
+        if tick % 5 == 0:
+            avail, psi = _system_pressure()
+            LOG.write(f"recursos: scrcpy rss={(rss or 0) // 1024}MB mem_livre={avail}MB psi_mem={psi}",
+                      sync=True)
+
+
+def install_handlers(mem_limit_mb=0, cpu_limit=0.0):
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, on_signal)
+    t = threading.Thread(target=watchdog, args=(mem_limit_mb, cpu_limit), daemon=True)
+    t.start()
 
 
 def cleanup():
-    if QR_PATH and os.path.exists(QR_PATH):
-        os.remove(QR_PATH)
+    if RT.child and RT.child.poll() is None:
+        terminate_child(RT.child)
+        try:
+            RT.child.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            RT.child.kill()
+    if RT.qr_path:
+        try:
+            os.remove(RT.qr_path)
+        except OSError:
+            pass
+        RT.qr_path = None
 
 
-def on_term(*_):
-    cleanup()
-    sys.exit(0)
+# ----------------------------------------------------------------- conexão
 
 
-def find_paired(ip=None, timeout=12):
-    """Espera um celular já pareado ficar online (conecta pelos serviços mDNS)."""
-    end = time.time() + timeout
-    while time.time() < end:
-        devs = cli.devices()
-        if devs:
-            return devs[0]
-        for _, kind, addr in cli.mdns_services():
-            if kind == "_adb-tls-connect._tcp" and (not ip or addr.startswith(ip + ":")):
-                cli.adb("connect", addr)
-        time.sleep(1.2)
-    return (cli.devices() or [None])[0]
+def list_devices():
+    return lib.parse_devices(lib.adb("devices", "-l", timeout=8).out)
+
+
+def find_device(last, want=None, timeout=SEARCH_TIMEOUT, ip_hint=None):
+    """Espera um aparelho online, conectando pelos serviços mDNS (e pelo IP:porta salvo).
+
+    Retorna (serial, mdns_name, addr, código_do_último_problema, viu_algum_serviço).
+    """
+    end = time.monotonic() + timeout
+    tried, addr_name, name_addr = set(), {}, {}
+    last_code, saw_services, direct_tried, disconnected = None, False, False, set()
+    while True:
+        devs = list_devices()
+        on = lib.online(devs)
+        if want:
+            on = [d for d in on if d["serial"] == want]
+        d = lib.pick_device(on, last)
+        if d:
+            addr = d["serial"] if ":" in d["serial"] else None
+            name = addr_name.get(addr)
+            for n, a in name_addr.items():
+                if d["serial"].startswith(n + "."):  # serial mDNS: "adb-XXX-yyy._adb-tls-connect._tcp"
+                    name, addr = n, a
+            return d["serial"], name, addr, None, True
+        for x in devs:
+            if x["state"] == "unauthorized":
+                last_code = "unauthorized"
+            elif x["state"] == "offline" and lib.is_wireless(x["serial"]) and x["serial"] not in disconnected:
+                disconnected.add(x["serial"])
+                lib.adb("disconnect", x["serial"], timeout=5)  # conexão velha (IP/porta mudou)
+        if time.monotonic() >= end:
+            break
+        services = lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out)
+        connects = [s for s in services if s[1].startswith("_adb-tls-connect")]
+        saw_services = saw_services or bool(connects)
+        mine = [s for s in connects if lib.mdns_instance_matches(s[0], last)
+                or (ip_hint and s[2].startswith(ip_hint + ":"))]
+        for name, _kind, addr in (mine or connects):
+            addr_name[addr] = name
+            name_addr[name] = addr
+            if addr in tried:
+                continue
+            tried.add(addr)
+            res = lib.adb("connect", addr, timeout=8)
+            ok, code = lib.classify_connect(res.out)
+            LOG.write(f"adb connect {addr}: {res.out[:120]}")
+            if not ok:
+                last_code = code
+        if not connects and last and last.get("addr") and not direct_tried:
+            direct_tried = True
+            ip, port = lib.split_addr(last["addr"])
+            if ip and lib.tcp_probe(ip, port, timeout=1.5) == "open":
+                res = lib.adb("connect", last["addr"], timeout=8)
+                ok, code = lib.classify_connect(res.out)
+                if not ok:
+                    last_code = code
+        time.sleep(1.5)
+    return None, None, None, last_code, saw_services
+
+
+def make_qr(name, password):
+    try:
+        import segno  # só aqui: fora do pareamento não paga o custo do import
+    except ImportError:
+        return None
+    rt = lib.runtime_dir()
+    for old in os.listdir(rt):
+        if old.startswith("qr-") and old.endswith(".png"):
+            try:
+                os.remove(os.path.join(rt, old))
+            except OSError:
+                pass
+    path = os.path.join(rt, f"qr-{name}.png")
+    segno.make(f"WIFI:T:ADB;S:{name};P:{password};;", error="m", micro=False).save(
+        path, kind="png", scale=8, border=4, dark="#000000", light="#ffffff")
+    return path
 
 
 def pair_qr():
-    global QR_PATH
-    import segno  # só aqui: fora do pareamento não paga o custo do import
+    """Mostra o QR e espera o celular. Retorna (ip, código_de_erro)."""
     name = "celular-%04d" % random.randint(0, 9999)
     password = "%06d" % random.randint(0, 999999)
-    QR_PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"{name}.png")
-    segno.make(f"WIFI:T:ADB;S:{name};P:{password};;", error="m", micro=False).save(
-        QR_PATH, kind="png", scale=8, border=4)
-    emit("pairing", "Escaneie o QR code com o celular", qr=QR_PATH)
-    end = time.time() + 180
-    while time.time() < end:
-        for svc, kind, addr in cli.mdns_services():
-            if kind == "_adb-tls-pairing._tcp" and svc == name:
-                emit("connecting", "Pareando…")
-                out = cli.adb("pair", addr, password)
-                cleanup()
-                return addr.split(":")[0] if "Successfully paired" in out else None
-        time.sleep(1)
-    cleanup()
-    return None
+    RT.qr_path = make_qr(name, password)
+    if not RT.qr_path:
+        return None, "internal"
+    emit_state("pairing", "Escaneie o QR code com o celular", qr=RT.qr_path, timeout=PAIR_TIMEOUT)
+    end = time.monotonic() + PAIR_TIMEOUT
+    try:
+        while time.monotonic() < end:
+            for svc, kind, addr in lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out):
+                if kind.startswith("_adb-tls-pairing") and svc == name:
+                    emit_state("connecting", "Pareando…")
+                    res = lib.adb("pair", addr, password, timeout=20)
+                    LOG.write(f"adb pair: {res.out[:200]}")
+                    code = "pair_failed" if res.timed_out else lib.classify_pair(res.out)
+                    return (addr.rsplit(":", 1)[0] if not code else None), code
+            time.sleep(1)
+    finally:
+        if RT.qr_path:
+            try:
+                os.remove(RT.qr_path)
+            except OSError:
+                pass
+            RT.qr_path = None
+    return None, "pair_timeout"
+
+
+def check_tools():
+    adb = lib.adb("version", timeout=5)
+    if adb.missing:
+        return "adb_missing", None
+    sc = lib.run([lib.scrcpy_path(), "--version"], timeout=8)
+    if sc.missing:
+        return "scrcpy_missing", None
+    ver = lib.scrcpy_version(sc.out)
+    if ver and ver < (2, 0):
+        return "scrcpy_too_old", ver
+    return None, ver
+
+
+def pc_network():
+    nets = lib.local_networks()
+    lans = lib.lan_networks(nets)
+    if lans:
+        return None, nets, lans
+    wifi = lib.wifi_status()
+    if wifi and not wifi["enabled"] and not wifi["ethernet"]:
+        return "wifi_off", nets, lans
+    return "no_network", nets, lans
+
+
+def connect_flow(a, last):
+    """Passos 1–4. Retorna (serial, registro_do_dispositivo) ou levanta _Fail."""
+    step(1, "run")
+    code, ver = check_tools()
+    if code:
+        step(1, "fail")
+        raise _Fail(code)
+    if a.app and ver and ver < (3, 0):
+        step(1, "fail")
+        raise _Fail("scrcpy_too_old")
+    code, nets, lans = pc_network()
+    if code:
+        step(1, "fail")
+        raise _Fail(code)
+    step(1, "ok", "PC na rede " + ", ".join(str(n.network) for _, n in lans[:2]))
+
+    step(2, "run")
+    res = lib.adb("start-server", timeout=20)
+    code = lib.classify_server(res)
+    if code:
+        step(2, "fail")
+        raise _Fail(code, detail=res.out[-200:])
+    step(2, "ok")
+
+    step(3, "run")
+    paired_at = None
+    serial = name = addr = None
+    if not a.pair:
+        serial, name, addr, code, saw = find_device(last, a.serial, timeout=a.search_timeout)
+        if not serial:
+            if code in ("unauthorized", "pairing_revoked"):
+                step(3, "fail")
+                raise _Fail(code)
+            if last is None and not a.no_auto_pair:
+                a.pair = True  # nunca pareou: vai direto para o QR code
+            else:
+                diag, details = lib.diagnose_unreachable(last, nets)
+                if diag == "phone_not_found" and code:
+                    diag = code
+                step(3, "fail")
+                raise _Fail(diag, details=details)
+    if a.pair:
+        emit_state("pairing", "Preparando o QR code…")
+        ip, code = pair_qr()
+        if code:
+            step(3, "fail")
+            raise _Fail(code)
+        paired_at = int(time.time())
+        emit_state("connecting", "Pareado! Conectando…")
+        serial, name, addr, code, _ = find_device(None, None, timeout=25, ip_hint=ip)
+        if not serial:
+            step(3, "fail")
+            raise _Fail(code if code in ("unauthorized",) else "connect_failed")
+    step(3, "ok")
+
+    step(4, "run")
+    emit_state("connecting", "Conectando…")
+    info = lib.device_info(serial) or {}
+    rec = {"serial": serial, "connected_at": int(time.time()), "online": True}
+    if addr:
+        rec["addr"] = addr
+    elif ":" in serial:
+        rec["addr"] = serial
+    if rec.get("addr"):
+        rec["port"] = lib.split_addr(rec["addr"])[1]
+    if name and not name.startswith("_"):
+        rec["mdns_name"] = name
+    if paired_at:
+        rec["paired_at"] = paired_at
+    rec.update(info)
+    if last and last.get("paired_at") and not paired_at and \
+            last.get("hw_serial") in (None, info.get("hw_serial")):
+        rec.setdefault("paired_at", last["paired_at"])
+    try:
+        rec = lib.save_device(rec)
+    except OSError as e:
+        LOG.write(f"não salvou o dispositivo: {e}")
+    emit({"event": "device", "device": rec})
+    if info.get("awake") is False:
+        emit_warning("phone_asleep", "A tela do celular está apagada",
+                     "Se a imagem não aparecer, desbloqueie o celular.")
+    step(4, "ok", f"Conectado a {rec.get('name') or serial}")
+    return serial, rec
+
+
+class _Fail(Exception):
+    def __init__(self, code, detail=None, details=None):
+        super().__init__(code)
+        self.code, self.detail, self.details = code, detail, details
+
+
+def scrcpy_cmd(a, serial, rec):
+    cmd = [lib.scrcpy_path(), "-s", serial]
+    if a.max_size > 0:
+        cmd.append(f"--max-size={a.max_size}")
+    if a.max_fps > 0:
+        cmd.append(f"--max-fps={a.max_fps}")
+    if a.bit_rate > 0:
+        cmd.append(f"--video-bit-rate={a.bit_rate}M")
+    if a.render_driver and a.render_driver != "auto":
+        cmd.append(f"--render-driver={a.render_driver}")
+    title = rec.get("name") or rec.get("model") or "Celular"
+    if a.app:
+        cmd += ["--new-display", f"--start-app={a.app}", "--no-vd-destroy-content"]
+        title = f"{a.app_label or a.app} — {title}"
+    cmd.append(f"--window-title={title}")
+    if not a.audio:
+        cmd.append("--no-audio")
+    if a.stay_awake and not a.app:
+        cmd.append("--stay-awake")
+    for flag in ("turn_screen_off", "fullscreen", "always_on_top"):
+        if getattr(a, flag) and not (a.app and flag == "turn_screen_off"):
+            cmd.append("--" + flag.replace("_", "-"))
+    if a.free_resize:
+        cmd.append("--no-window-aspect-ratio-lock")
+    return cmd
+
+
+def run_scrcpy(a, serial, rec):
+    step(5, "run")
+    cmd = scrcpy_cmd(a, serial, rec)
+    env = lib.adb_env()
+    if a.gpu_safe:
+        env = lib.gpu_safe_env(env)
+    if a.video_driver and a.video_driver != "auto":
+        env["SDL_VIDEO_DRIVER"] = a.video_driver
+    LOG.write("scrcpy: " + " ".join(cmd), sync=True)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env, preexec_fn=_child_setup)
+    except OSError as e:
+        step(5, "fail")
+        return emit_error("scrcpy_missing", detail=str(e))
+    RT.child = proc
+    tail = collections.deque(maxlen=60)
+    started, warned = False, set()
+    stream = io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace")
+    for line in stream:
+        line = line.rstrip()
+        if not line:
+            continue
+        LOG.write("scrcpy> " + line[:300])
+        tail.append(line)
+        c = lib.classify_scrcpy_line(line)
+        if c and not c[1] and c[0] not in warned:
+            warned.add(c[0])
+            emit_warning(c[0])
+        if not started and ("Renderer:" in line or "Texture:" in line):
+            started = True
+            step(5, "ok")
+            emit_state("mirroring", rec.get("name") or serial, serial=serial)
+    proc.wait()
+    rc = proc.returncode
+    LOG.write(f"scrcpy saiu com {rc} (motivo: {RT.killed_reason})", sync=True)
+    code, detail = lib.classify_scrcpy_exit(rc, tail, RT.killed_reason)
+    RT.child = None
+    try:
+        lib.save_device({"online": False, "last_seen": int(time.time())})
+    except OSError:
+        pass
+    if code:
+        if not started:
+            step(5, "fail")
+        return emit_error(code, detail=detail)
+    emit_state("stopped", "Espelhamento encerrado")
+    return 0
+
+
+def cmd_mirror(a):
+    install_handlers(a.memory_limit, a.cpu_limit)
+    LOG.write(f"mirror iniciado: {vars(a)}", sync=True)
+    emit_state("searching", "Procurando celular…")
+    last = lib.load_device()
+    try:
+        serial, rec = connect_flow(a, last)
+    except _Fail as f:
+        extra = {"details": f.details} if f.details else {}
+        return emit_error(f.code, detail=f.detail, **extra)
+    return run_scrcpy(a, serial, rec)
+
+
+# ----------------------------------------------------------------- ações
+
+
+def online_serial(want=None, connect=True):
+    devs = list_devices()
+    last = lib.load_device()
+    on = [d for d in lib.online(devs) if not want or d["serial"] == want]
+    d = lib.pick_device(on, last)
+    if d or not connect:
+        return d["serial"] if d else None
+    serial, *_ = find_device(last, None, timeout=4)
+    return serial
+
+
+def result(action, ok, text="", **extra):
+    emit({"event": "result", "action": action, "ok": ok, "text": text, **extra})
+    return 0 if ok else 1
+
+
+def _dest_dir(a, sub="Celular"):
+    base = a.dest or os.path.join(os.path.expanduser("~"), "Imagens")
+    path = base if a.dest else os.path.join(base, sub)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def cmd_action(a):
+    install_handlers()
+    name = a.name
+    LOG.write(f"ação {name}")
+    if name == "forget":
+        last = lib.forget_device()
+        return result(name, True, "Celular esquecido", device=last)
+    if name == "info":
+        serial = online_serial(a.serial, connect=False)
+        if not serial:
+            emit({"event": "offline"})
+            return result(name, False, code="phone_not_found")
+        info = lib.device_info(serial, timeout=8)
+        if not info:
+            return result(name, False, code="device_offline")
+        rec = lib.save_device({**info, "serial": serial, "online": True, "last_seen": int(time.time())})
+        emit({"event": "device", "device": rec})
+        return result(name, True)
+
+    serial = online_serial(a.serial)
+    if not serial:
+        info = lib.error_info("phone_not_found")
+        return result(name, False, info["text"], code="phone_not_found", hint=info["hint"])
+
+    if name in KEYEVENTS:
+        res = lib.adb("shell", "input", "keyevent", str(KEYEVENTS[name]), serial=serial, timeout=8)
+        return result(name, res.ok, "" if res.ok else res.out[-200:])
+    if name == "camera":
+        res = lib.adb("shell", "am", "start", "-a", "android.media.action.STILL_IMAGE_CAMERA",
+                      serial=serial, timeout=10)
+        return result(name, res.ok and "Error" not in res.out, "Câmera aberta no celular")
+    if name == "screenshot":
+        path = os.path.join(_dest_dir(a), time.strftime("Celular %Y-%m-%d %H-%M-%S.png"))
+        with open(path, "wb") as f:
+            res = lib.run([lib.adb_path(), "-s", serial, "exec-out", "screencap", "-p"],
+                          timeout=20, env=lib.adb_env(), stdout_file=f)
+        ok = res.ok and os.path.getsize(path) > 8
+        if ok:
+            with open(path, "rb") as f:
+                ok = f.read(8) == b"\x89PNG\r\n\x1a\n"
+        if not ok:
+            os.remove(path)
+            return result(name, False, "Não foi possível capturar a tela", detail=res.out[-200:])
+        return result(name, True, "Captura salva", path=path)
+    if name == "pull-photo":
+        script = ("ls -1t -d /sdcard/DCIM/Camera/* /sdcard/DCIM/Screenshots/* "
+                  "/sdcard/Pictures/Screenshots/* 2>/dev/null | grep -v '/\\.' | head -n 1")
+        res = lib.adb("shell", script, serial=serial, timeout=15)
+        remote = res.out.strip().splitlines()[0].strip() if res.ok and res.out.strip() else ""
+        if not remote.startswith("/sdcard/"):
+            return result(name, False, "Nenhuma foto encontrada no celular")
+        dest = _dest_dir(a)
+        res = lib.adb("pull", "-a", remote, dest, serial=serial, timeout=180)
+        path = os.path.join(dest, os.path.basename(remote))
+        return result(name, res.ok, "Foto copiada" if res.ok else res.out[-200:], path=path)
+    if name == "push":
+        files = [f for f in a.files if os.path.isfile(f)]
+        if not files:
+            return result(name, False, "Nenhum arquivo para enviar")
+        res = lib.adb("push", *files, "/sdcard/Download/", serial=serial, timeout=1800)
+        text = (f"{len(files)} arquivo(s) enviado(s) para Download no celular" if res.ok
+                else "Falha ao enviar: " + res.out[-200:])
+        return result(name, res.ok, text, count=len(files))
+    if name == "notifications":
+        res = lib.adb("shell", "dumpsys", "notification", "--noredact", serial=serial, timeout=20)
+        if not res.ok:
+            return result(name, False, "Não foi possível ler as notificações")
+        items = lib.parse_notifications(res.out)
+        labels = {}
+        try:
+            with open(lib.apps_file()) as f:
+                labels = {x["pkg"]: x["label"] for x in json.load(f).get("apps", [])}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        for it in items:
+            it["app"] = labels.get(it["pkg"], it["pkg"].rsplit(".", 1)[-1].capitalize())
+        emit({"event": "notifications", "items": items})
+        return result(name, True)
+    if name == "apps":
+        env = lib.gpu_safe_env(lib.adb_env())
+        res = lib.run([lib.scrcpy_path(), "-s", serial, "--list-apps"], timeout=45, env=env)
+        apps = [x for x in lib.parse_apps(res.out)]
+        if not apps:
+            return result(name, False, "Não foi possível listar os apps", detail=res.out[-200:])
+        try:
+            os.makedirs(os.path.dirname(lib.apps_file()), exist_ok=True)
+            with open(lib.apps_file(), "w") as f:
+                json.dump({"serial": serial, "at": int(time.time()), "apps": apps}, f, ensure_ascii=False)
+        except OSError:
+            pass
+        emit({"event": "apps", "items": apps})
+        return result(name, True)
+    return result(name, False, f"Ação desconhecida: {name}")
+
+
+# ----------------------------------------------------------------- diagnóstico
+
+
+def cmd_diagnose(a):
+    install_handlers()
+    items = []
+
+    def add(level, text):
+        items.append({"level": level, "text": text})
+        emit({"event": "check", "level": level, "text": text})
+
+    last = lib.load_device()
+    code, ver = check_tools()
+    if code:
+        add("error", lib.error_info(code)["text"])
+    else:
+        add("ok", f"adb e scrcpy {'.'.join(map(str, ver)) if ver else ''} instalados")
+    nets = lib.local_networks()
+    lans = lib.lan_networks(nets)
+    wifi = lib.wifi_status()
+    if lans:
+        add("ok", "PC na rede " + ", ".join(f"{n.network} ({i})" for i, n in lans[:3]))
+    else:
+        add("error", "PC sem rede local")
+    if wifi:
+        if not wifi["enabled"]:
+            add("warn" if wifi["ethernet"] else "error", "Wi-Fi do PC desligado")
+        elif wifi["connected"]:
+            add("ok", f"Wi-Fi do PC conectado em «{wifi['ssid']}»")
+    vpns = lib.active_vpns(nets)
+    if vpns:
+        via = lib.default_route_iface() in vpns
+        add("warn" if via else "ok",
+            f"VPN ativa: {', '.join(vpns)}" + (" (todo o tráfego passa por ela!)" if via else " (não é a rota padrão)"))
+    fw = lib.firewall_blocks_mdns()
+    if fw:
+        add("warn", "O firewall não libera mDNS (5353/UDP) na zona padrão")
+    elif fw is False:
+        add("ok", "Firewall libera mDNS")
+    res = lib.adb("start-server", timeout=20)
+    scode = lib.classify_server(res)
+    add("error" if scode else "ok", lib.error_info(scode)["text"] if scode else "Servidor adb rodando")
+    if not scode:
+        add("ok" if lib.mdns_ok() else "error",
+            "Descoberta mDNS do adb funcionando" if lib.mdns_ok() else "Descoberta mDNS do adb indisponível")
+        services = lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out)
+        connects = [s for s in services if s[1].startswith("_adb-tls-connect")]
+        mine = [s for s in connects if lib.mdns_instance_matches(s[0], last)]
+        if mine:
+            add("ok", f"Celular visível na rede em {mine[0][2]}")
+        elif connects:
+            add("warn", f"{len(connects)} aparelho(s) com Depuração por Wi-Fi visível(is), mas não o último usado")
+        else:
+            add("warn", "Nenhum celular com Depuração por Wi-Fi visível na rede")
+        for d in list_devices():
+            level = "ok" if d["state"] == "device" else "warn"
+            add(level, f"adb: {d.get('model') or d['serial']} — {d['state']}")
+    if last:
+        ip = last.get("ip")
+        if ip:
+            same = lib.same_subnet(ip, lans)
+            add("ok" if same else "error",
+                f"Último IP do celular {ip} " + ("está na mesma rede do PC" if same else "NÃO está na rede do PC"))
+    diag = None
+    online = [d for d in list_devices() if d["state"] == "device"] if not scode else []
+    if not online:
+        diag, _details = lib.diagnose_unreachable(last, nets)
+    info = lib.error_info(diag) if diag else {"code": None, "text": "Tudo certo: o celular está conectado", "hint": ""}
+    emit({"event": "diagnosis", "items": items, **info})
+    return 0
+
+
+# ----------------------------------------------------------------- main
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="celular-backend")
+    sub = p.add_subparsers(dest="cmd")
+    m = sub.add_parser("mirror")
+    m.add_argument("--pair", action="store_true")
+    m.add_argument("--no-auto-pair", action="store_true")
+    m.add_argument("--serial")
+    m.add_argument("--app")
+    m.add_argument("--app-label")
+    m.add_argument("--audio", action="store_true")
+    m.add_argument("--turn-screen-off", action="store_true")
+    m.add_argument("--free-resize", action="store_true")
+    m.add_argument("--fullscreen", action="store_true")
+    m.add_argument("--always-on-top", action="store_true")
+    m.add_argument("--stay-awake", action="store_true")
+    m.add_argument("--max-size", type=int, default=1280)
+    m.add_argument("--max-fps", type=int, default=60)
+    m.add_argument("--bit-rate", type=int, default=8)
+    m.add_argument("--render-driver", default="opengl",
+                   choices=["auto", "opengl", "opengles2", "opengles", "software"])
+    m.add_argument("--video-driver", default="auto", choices=["auto", "wayland", "x11"])
+    m.add_argument("--gpu-safe", action="store_true")
+    m.add_argument("--memory-limit", type=int, default=1024, help="MB (0 = sem limite)")
+    m.add_argument("--cpu-limit", type=float, default=3.0, help="núcleos (0 = sem limite)")
+    m.add_argument("--search-timeout", type=int, default=SEARCH_TIMEOUT)
+    act = sub.add_parser("action")
+    act.add_argument("name")
+    act.add_argument("--serial")
+    act.add_argument("--dest")
+    act.add_argument("files", nargs="*")
+    sub.add_parser("diagnose")
+    return p
 
 
 def main(argv):
-    signal.signal(signal.SIGTERM, on_term)
-    signal.signal(signal.SIGINT, on_term)
-    emit("searching", "Procurando celular…")
-    cli.adb("start-server", timeout=30)
-
-    serial = None if "--pair" in argv else find_paired()
-    if not serial:
-        ip = pair_qr()
-        if not ip:
-            emit("error", "Pareamento não concluído (tempo esgotado ou recusado)")
-            return 1
-        emit("connecting", "Pareado! Conectando…")
-        serial = find_paired(ip)
-    if not serial:
-        emit("error", "Não foi possível conectar. Confira a Depuração por Wi-Fi no celular.")
+    # compatibilidade com a extensão antiga: sem subcomando = mirror
+    if not argv or argv[0].startswith("-"):
+        argv = ["mirror"] + [x for x in argv if x != "--no-window-aspect-ratio-lock"] + \
+            (["--free-resize"] if "--no-window-aspect-ratio-lock" in argv else [])
+        if "--no-audio" in argv:
+            argv.remove("--no-audio")
+        else:
+            argv.append("--audio")
+    a = build_parser().parse_args(argv)
+    try:
+        if a.cmd == "mirror":
+            return cmd_mirror(a)
+        if a.cmd == "action":
+            return cmd_action(a)
+        if a.cmd == "diagnose":
+            return cmd_diagnose(a)
+        return 2
+    except Stopped as e:
+        LOG.write(f"encerrado: {e}", sync=True)
+        try:
+            emit_state("stopped", "Cancelado")
+        except Stopped:
+            pass
+        return 0
+    except Exception as e:  # noqa: BLE001 — nunca deixar traceback cru para a extensão
+        import traceback
+        LOG.write("ERRO INTERNO\n" + traceback.format_exc(), sync=True)
+        try:
+            emit_error("internal", detail=f"{type(e).__name__}: {e}")
+        except Stopped:
+            pass
         return 1
-
-    cmd = [cli.SCRCPY, "-s", serial, "--stay-awake"]
-    allowed = ("--no-audio", "--turn-screen-off", "--no-window-aspect-ratio-lock",
-               "--fullscreen", "--always-on-top")
-    cmd += [a for a in argv if a in allowed]
-    emit("mirroring", serial)
-    devnull = os.open(os.devnull, os.O_RDWR)  # scrcpy é falante; não deixa entupir o pipe
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
-    os.execv(cli.SCRCPY, cmd)
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":

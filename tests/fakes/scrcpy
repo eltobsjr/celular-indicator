@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""scrcpy falso: `--version` → 4.1; senão imprime $FAKE_SCRCPY_OUT, dorme e sai com $FAKE_SCRCPY_RC.
+
+$FAKE_SCRCPY_ALLOC_MB aloca memória (para testar o watchdog). Anota o pid e os args.
+"""
+import os
+import sys
+import time
+
+if "--version" in sys.argv:
+    print("scrcpy 4.1 <https://github.com/Genymobile/scrcpy>")
+    sys.exit(0)
+d = os.environ.get("FAKE_ADB_DIR", "/tmp")
+with open(os.path.join(d, "scrcpy.pid"), "w") as f:
+    f.write(str(os.getpid()))
+with open(os.path.join(d, "scrcpy.args"), "w") as f:
+    f.write("\n".join(sys.argv[1:]))
+    f.write("\nENV_EGL=" + os.environ.get("__EGL_VENDOR_LIBRARY_FILENAMES", ""))
+if "--list-apps" in sys.argv:
+    print("[server] INFO: List of apps:")
+    print(" * Configurações                 com.android.settings")
+    print(" - WhatsApp                      com.whatsapp")
+    sys.exit(0)
+for line in os.environ.get("FAKE_SCRCPY_OUT", "").split("|"):
+    if line:
+        print(line, flush=True)
+hog = bytearray(int(os.environ.get("FAKE_SCRCPY_ALLOC_MB", "0")) * 1024 * 1024)
+for i in range(0, len(hog), 4096):
+    hog[i] = 1
+time.sleep(float(os.environ.get("FAKE_SCRCPY_SLEEP", "0")))
+sys.exit(int(os.environ.get("FAKE_SCRCPY_RC", "0")))

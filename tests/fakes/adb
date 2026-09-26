@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""adb falso para os testes: responde com arquivos de $FAKE_ADB_DIR.
+
+Chave = subcomando (e, para `shell`, a primeira palavra do comando remoto):
+  devices, mdns_services, mdns_check, connect, pair, start-server, shell_echo, ...
+Arquivos: <chave> (saída), <chave>.rc (código de saída), <chave>.sleep (segundos).
+Toda chamada é anotada em $FAKE_ADB_DIR/calls.log.
+"""
+import os
+import sys
+import time
+
+d = os.environ["FAKE_ADB_DIR"]
+args = sys.argv[1:]
+if args[:1] == ["-s"]:
+    args = args[2:]
+with open(os.path.join(d, "calls.log"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+key = args[0] if args else "none"
+if key in ("mdns", "shell", "exec-out") and len(args) > 1:
+    key = f"{key}_{args[1].split()[0].split(';')[0]}"
+if key == "version":
+    print("Android Debug Bridge version 1.0.41")
+    sys.exit(0)
+
+
+def read(name, default=""):
+    try:
+        with open(os.path.join(d, name)) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+delay = read(key + ".sleep").strip()
+if delay:
+    time.sleep(float(delay))
+sys.stdout.write(read(key))
+sys.exit(int(read(key + ".rc", "0").strip() or 0))
