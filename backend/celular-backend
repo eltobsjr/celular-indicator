@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Backend leve da extensão 'celular': acha (ou pareia por QR) o celular e vira o scrcpy.
+
+Fala com a extensão por linhas JSON no stdout. Depois de conectar, se substitui pelo
+scrcpy (exec), então não sobra nenhum processo Python enquanto o espelhamento roda.
+Opções: --pair (força QR) e as flags de scrcpy --no-audio, --turn-screen-off,
+--no-window-aspect-ratio-lock, --fullscreen, --always-on-top. SIGTERM cancela.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import random
+import signal
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("celular_cli", os.path.join(HERE, "celular"))
+_spec = importlib.util.spec_from_loader("celular_cli", _loader)
+cli = importlib.util.module_from_spec(_spec)
+_loader.exec_module(cli)  # reaproveita adb(), devices(), mdns_services()
+
+QR_PATH = None
+
+
+def emit(state, text="", **extra):
+    print(json.dumps({"state": state, "text": text, **extra}, ensure_ascii=False), flush=True)
+
+
+def cleanup():
+    if QR_PATH and os.path.exists(QR_PATH):
+        os.remove(QR_PATH)
+
+
+def on_term(*_):
+    cleanup()
+    sys.exit(0)
+
+
+def find_paired(ip=None, timeout=12):
+    """Espera um celular já pareado ficar online (conecta pelos serviços mDNS)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        devs = cli.devices()
+        if devs:
+            return devs[0]
+        for _, kind, addr in cli.mdns_services():
+            if kind == "_adb-tls-connect._tcp" and (not ip or addr.startswith(ip + ":")):
+                cli.adb("connect", addr)
+        time.sleep(1.2)
+    return (cli.devices() or [None])[0]
+
+
+def pair_qr():
+    global QR_PATH
+    import segno  # só aqui: fora do pareamento não paga o custo do import
+    name = "celular-%04d" % random.randint(0, 9999)
+    password = "%06d" % random.randint(0, 999999)
+    QR_PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"{name}.png")
+    segno.make(f"WIFI:T:ADB;S:{name};P:{password};;", error="m", micro=False).save(
+        QR_PATH, kind="png", scale=8, border=4)
+    emit("pairing", "Escaneie o QR code com o celular", qr=QR_PATH)
+    end = time.time() + 180
+    while time.time() < end:
+        for svc, kind, addr in cli.mdns_services():
+            if kind == "_adb-tls-pairing._tcp" and svc == name:
+                emit("connecting", "Pareando…")
+                out = cli.adb("pair", addr, password)
+                cleanup()
+                return addr.split(":")[0] if "Successfully paired" in out else None
+        time.sleep(1)
+    cleanup()
+    return None
+
+
+def main(argv):
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
+    emit("searching", "Procurando celular…")
+    cli.adb("start-server", timeout=30)
+
+    serial = None if "--pair" in argv else find_paired()
+    if not serial:
+        ip = pair_qr()
+        if not ip:
+            emit("error", "Pareamento não concluído (tempo esgotado ou recusado)")
+            return 1
+        emit("connecting", "Pareado! Conectando…")
+        serial = find_paired(ip)
+    if not serial:
+        emit("error", "Não foi possível conectar. Confira a Depuração por Wi-Fi no celular.")
+        return 1
+
+    cmd = [cli.SCRCPY, "-s", serial, "--stay-awake"]
+    allowed = ("--no-audio", "--turn-screen-off", "--no-window-aspect-ratio-lock",
+               "--fullscreen", "--always-on-top")
+    cmd += [a for a in argv if a in allowed]
+    emit("mirroring", serial)
+    devnull = os.open(os.devnull, os.O_RDWR)  # scrcpy é falante; não deixa entupir o pipe
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.execv(cli.SCRCPY, cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

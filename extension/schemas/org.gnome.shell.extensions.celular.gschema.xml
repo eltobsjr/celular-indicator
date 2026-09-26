@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <enum id="org.gnome.shell.extensions.celular.panel-position">
+    <value nick="right"      value="0"/>
+    <value nick="left"       value="1"/>
+    <value nick="left-edge"  value="2"/>
+  </enum>
+
+  <schema id="org.gnome.shell.extensions.celular"
+          path="/org/gnome/shell/extensions/celular/">
+
+    <key name="panel-position" enum="org.gnome.shell.extensions.celular.panel-position">
+      <default>'right'</default>
+      <summary>Posição do indicador na barra superior</summary>
+    </key>
+
+    <key name="audio" type="b">
+      <default>true</default>
+      <summary>Som do celular no PC</summary>
+      <description>Encaminha o áudio do celular (Android 11+) para o PC. Vale na próxima vez que ligar.</description>
+    </key>
+
+    <key name="turn-screen-off" type="b">
+      <default>false</default>
+      <summary>Apagar a tela do celular</summary>
+      <description>Mantém a tela do celular apagada enquanto espelha. Vale na próxima vez que ligar.</description>
+    </key>
+
+    <key name="free-resize" type="b">
+      <default>true</default>
+      <summary>Redimensionar a janela livremente</summary>
+      <description>Solta a proporção da janela: dá para esticar do tamanho que quiser e o vídeo fica centralizado com barras pretas nas sobras.</description>
+    </key>
+
+    <key name="fullscreen" type="b">
+      <default>false</default>
+      <summary>Abrir em tela cheia</summary>
+      <description>Inicia o espelhamento em tela cheia, com barras pretas para preencher a tela toda.</description>
+    </key>
+
+    <key name="always-on-top" type="b">
+      <default>false</default>
+      <summary>Manter a janela sempre no topo</summary>
+    </key>
+
+    <key name="show-notifications" type="b">
+      <default>true</default>
+      <summary>Mostrar notificações de erro</summary>
+    </key>
+
+  </schema>
+</schemalist>

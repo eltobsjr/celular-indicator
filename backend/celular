@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""celular — espelha o celular Android via Wi-Fi com scrcpy.
+
+Uso:
+  celular              conecta (pareando por QR code se preciso) e abre o scrcpy
+  celular --parear     força um novo pareamento por QR code
+  celular --codigo     pareamento manual (IP:porta + código de 6 dígitos)
+  celular --sair       desconecta o celular
+  celular [opções...]  qualquer outra opção vai direto para o scrcpy
+"""
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+
+DATA = os.environ.get("CELULAR_HOME") or os.path.join(
+    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "celular")
+
+
+def _tool(name):
+    """scrcpy/adb instalados pelo install.sh; se não houver, usa os do PATH."""
+    mine = os.path.join(DATA, "scrcpy", name)
+    return mine if os.access(mine, os.X_OK) else (shutil.which(name) or mine)
+
+
+ADB = _tool("adb")
+SCRCPY = _tool("scrcpy")
+os.environ["ADB"] = ADB
+
+QR_TIMEOUT = 120
+CONNECT_TIMEOUT = 20
+
+
+def adb(*args, timeout=15):
+    r = subprocess.run([ADB, *args], capture_output=True, text=True, timeout=timeout)
+    return (r.stdout + r.stderr).strip()
+
+
+def devices():
+    """Serials de aparelhos autorizados e online."""
+    out = adb("devices").splitlines()[1:]
+    return [l.split("\t")[0] for l in out if l.endswith("\tdevice")]
+
+
+def mdns_services():
+    """[(nome, tipo, 'ip:porta')] descobertos pelo adb na rede."""
+    out = adb("mdns", "services").splitlines()
+    found = []
+    for line in out:
+        parts = line.split()
+        if len(parts) == 3 and parts[1].startswith("_adb-tls"):
+            found.append(tuple(parts))
+    return found
+
+
+def render_qr(text):
+    """Desenha o QR com fundo branco fixo (funciona em qualquer tema de terminal)."""
+    import segno  # só carrega quando há QR pra desenhar
+    m = [list(row) for row in segno.make(text, error="m", micro=False).matrix]
+    q = 4  # zona de silêncio
+    w = len(m[0]) + 2 * q
+    grid = [[0] * w for _ in range(q)]
+    grid += [[0] * q + row + [0] * q for row in m]
+    grid += [[0] * w for _ in range(q)]
+    if len(grid) % 2:
+        grid.append([0] * w)
+    glyph = {(0, 0): " ", (1, 1): "█", (1, 0): "▀", (0, 1): "▄"}
+    lines = []
+    for y in range(0, len(grid), 2):
+        row = "".join(glyph[(grid[y][x], grid[y + 1][x])] for x in range(w))
+        lines.append("  \033[47;30m" + row + "\033[0m")
+    print("\n".join(lines))
+
+
+def wait_connect(hint_ip=None):
+    """Espera o celular ficar online; tenta 'adb connect' nos serviços descobertos."""
+    end = time.time() + CONNECT_TIMEOUT
+    while time.time() < end:
+        if devices():
+            return True
+        for _, kind, addr in mdns_services():
+            if kind == "_adb-tls-connect._tcp" and (not hint_ip or addr.startswith(hint_ip + ":")):
+                adb("connect", addr)
+        time.sleep(1.5)
+    return bool(devices())
+
+
+def pair_qr():
+    name = "celular-%04d" % random.randint(0, 9999)
+    password = "%06d" % random.randint(0, 999999)
+    print("\nNo celular: Configurações → Opções do desenvolvedor → Depuração por Wi-Fi")
+    print("→ \"Parear o dispositivo com um QR code\" e aponte a câmera aqui:\n")
+    render_qr(f"WIFI:T:ADB;S:{name};P:{password};;")
+    print(f"\nAguardando o celular escanear (até {QR_TIMEOUT}s, Ctrl+C cancela)...")
+    end = time.time() + QR_TIMEOUT
+    while time.time() < end:
+        for svc, kind, addr in mdns_services():
+            if kind == "_adb-tls-pairing._tcp" and svc == name:
+                print(f"Celular encontrado em {addr}, pareando...")
+                out = adb("pair", addr, password)
+                print(out)
+                if "Successfully paired" in out:
+                    return addr.split(":")[0]
+                return None
+        time.sleep(1)
+    print("Tempo esgotado sem ninguém escanear o QR.")
+    return None
+
+
+def pair_manual():
+    print("\nNo celular: Depuração por Wi-Fi → \"Parear o dispositivo com um código de pareamento\"")
+    addr = input("IP:porta do pareamento: ").strip()
+    code = input("Código de 6 dígitos: ").strip()
+    out = adb("pair", addr, code)
+    print(out)
+    return addr.split(":")[0] if "Successfully paired" in out else None
+
+
+def main():
+    args = sys.argv[1:]
+
+    if args[:1] in (["-h"], ["--help"], ["--ajuda"]):
+        print(__doc__)
+        return 0
+    adb("start-server", timeout=30)
+
+    if args[:1] == ["--sair"]:
+        print(adb("disconnect"))
+        return 0
+
+    force = args[:1] in (["--parear"], ["--codigo"])
+    if not force and not devices():
+        # Celulares já pareados aparecem sozinhos via mDNS quando estão na mesma rede.
+        print("Procurando celular já pareado na rede...")
+        if not wait_connect():
+            print("Nenhum celular pareado encontrado — vamos parear.")
+            force = True
+
+    if force:
+        try:
+            ip = pair_manual() if args[:1] == ["--codigo"] else pair_qr()
+        except KeyboardInterrupt:
+            print("\nCancelado.")
+            return 1
+        if not ip:
+            print("Pareamento não concluído.")
+            return 1
+        print("Pareado! Conectando...")
+        if not wait_connect(ip):
+            print("Pareou, mas não consegui conectar. Confira se a Depuração por Wi-Fi continua ativada.")
+            return 1
+
+    if args[:1] in (["--parear"], ["--codigo"]):
+        args = args[1:]
+    serial = devices()[0]
+    print(f"Conectado a {serial}. Abrindo espelhamento...")
+    return subprocess.call([SCRCPY, "-s", serial, "--stay-awake", *args])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

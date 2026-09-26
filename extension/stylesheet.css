@@ -1,0 +1,17 @@
+.cel-header-box { spacing: 2px; padding: 4px 8px; }
+.cel-header-title { font-weight: bold; }
+.cel-header-subtitle { font-size: 0.9em; }
+.cel-qr-box { spacing: 8px; padding: 4px 8px; }
+.cel-qr-hint { font-size: 0.85em; color: #6f8396; text-align: center; }
+
+.cel-on { color: #3a944a; }
+.cel-header-subtitle.cel-on { color: #3a944a; }
+
+.cel-off { color: #6f8396; }
+.cel-header-subtitle.cel-off { color: #6f8396; }
+
+.cel-pending { color: #c88800; }
+.cel-header-subtitle.cel-pending { color: #c88800; }
+
+.cel-error { color: #e62d42; }
+.cel-header-subtitle.cel-error { color: #e62d42; }

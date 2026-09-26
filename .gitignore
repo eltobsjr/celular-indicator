@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.shell-extension.zip
+extension/schemas/gschemas.compiled
+venv/
+memory/
+CLAUDE.md
