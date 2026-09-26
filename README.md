@@ -3,7 +3,7 @@
 Uma extensão do **GNOME Shell** que mostra a tela do celular **Android** no PC,
 **sem cabo**, direto da barra superior — no espírito do *Vincular ao Celular*
 (Phone Link) do Windows. Usa o [scrcpy](https://github.com/Genymobile/scrcpy) e o
-`adb` por baixo e faz o pareamento por **QR code**.
+`adb` por baixo e faz o pareamento por **QR code** ou por **código de 6 dígitos**.
 
 ## Instalação
 
@@ -22,8 +22,14 @@ No **Wayland** é preciso fazer **logout/login** depois de instalar ou atualizar
 1. No celular: **Configurações → Sobre o telefone → Informações do software**.
 2. Toque **7 vezes** em **Número da versão** (ativa o modo de desenvolvedor).
 3. **Opções do desenvolvedor → Depuração por Wi-Fi** → ligar.
-4. Toque em **Depuração por Wi-Fi → Parear o dispositivo com um QR code**.
-5. No PC: menu do ícone → **Parear novo celular (QR code)** e aponte a câmera.
+4. No PC: menu do ícone → **Parear novo celular…** e escolha a aba:
+   - **QR code**: no celular, toque em **Depuração por Wi-Fi → Parear o dispositivo com
+     um QR code** e aponte a câmera para o QR do menu;
+   - **Código** (sem câmera, ou se o QR não lê): no celular, **Parear o dispositivo com
+     um código de pareamento**, digite os 6 números no menu e clique em **Parear com o
+     código**. O PC acha o IP:porta sozinho pela rede; se não achar, use
+     **Informar IP:porta manualmente** e copie o endereço que o celular mostra.
+     Deixe a tela de código aberta no celular até terminar.
 
 PC e celular precisam estar **no mesmo Wi-Fi**. Depois disso é só clicar em
 **Abrir tela do celular**.
@@ -54,7 +60,7 @@ PC e celular precisam estar **no mesmo Wi-Fi**. Depois disso é só clicar em
 - **Abrir app do celular em janela** (`scrcpy --new-display --start-app`).
 - **Diagnosticar conexão**, **Esquecer este celular**, **Opções** e **Configurações**.
 
-Pelo terminal: `celular`, `celular --parear`, `celular --diagnostico`, `celular --info`.
+Pelo terminal: `celular`, `celular --parear` (QR), `celular --codigo` (código de 6 dígitos), `celular --diagnostico`, `celular --info`.
 
 ## Por que não conecta? (códigos de erro)
 
@@ -71,6 +77,7 @@ O backend classifica o problema e a extensão mostra texto + dica. Os principais
 | `port_changed` | IP/porta mudou (reinício do celular ou da depuração) |
 | `pairing_revoked` / `unauthorized` / `device_offline` | Pareamento revogado, falta tocar em «Permitir», ou adb vê o celular como offline |
 | `pair_timeout` / `pair_failed` / `connect_failed` | Problemas no pareamento por QR |
+| `pair_code_invalid` / `pair_code_timeout` / `pair_code_failed` | Código malformado, celular sem a tela de código aberta, ou código/IP:porta recusado |
 | `adb_missing` / `scrcpy_missing` / `scrcpy_too_old` | Ferramentas ausentes ou antigas |
 | `adb_server_failed` / `adb_version_conflict` | Porta 5037 presa ou dois adb de versões diferentes |
 | `server_connection_failed` / `device_lost` / `connection_lost` / `encoder_error` / `video_output_error` / `audio_failed` | Erros do scrcpy traduzidos |
