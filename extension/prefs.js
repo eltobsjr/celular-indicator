@@ -211,6 +211,20 @@ export default class CelularPrefs extends ExtensionPreferences {
         settings.bind('auto-reconnect', reconnectRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         connGroup.add(reconnectRow);
 
+        const liveRow = new Adw.SwitchRow({
+            title: _('Tempo real (notificações e bateria)'),
+            subtitle: _('Com o celular conectado, mostra as notificações novas dele no PC e atualiza a bateria. Por evento, sem polling; para sozinho quando o celular sai da rede'),
+        });
+        settings.bind('live-sync', liveRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        connGroup.add(liveRow);
+
+        const dndRow = new Adw.SwitchRow({
+            title: _('Não perturbe junto com o PC'),
+            subtitle: _('Ligar/desligar o Não perturbe do GNOME faz o mesmo no celular'),
+        });
+        settings.bind('sync-dnd', dndRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        connGroup.add(dndRow);
+
         const dirRow = new Adw.EntryRow({
             title: _('Pasta das capturas e fotos (vazio = Imagens/Celular)'),
         });

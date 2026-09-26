@@ -107,6 +107,18 @@
       <description>Depois de uma queda de conexão, tenta de novo poucas vezes (15 s, 45 s e 2 min) e quando a rede do PC muda. Nunca fica verificando sem parar.</description>
     </key>
 
+    <key name="live-sync" type="b">
+      <default>false</default>
+      <summary>Sincronizar em tempo real</summary>
+      <description>Enquanto o celular estiver conectado, mostra as notificações novas dele no PC e atualiza a bateria. É por evento (o adb fica esperando o celular avisar), sem polling; para sozinho quando o celular sai da rede.</description>
+    </key>
+
+    <key name="sync-dnd" type="b">
+      <default>false</default>
+      <summary>Não perturbe junto com o PC</summary>
+      <description>Quando você liga/desliga o Não perturbe do GNOME, faz o mesmo no celular (se ele estiver conectado).</description>
+    </key>
+
     <key name="show-notifications" type="b">
       <default>true</default>
       <summary>Mostrar notificações de erro</summary>

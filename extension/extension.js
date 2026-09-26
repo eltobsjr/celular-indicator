@@ -328,6 +328,9 @@ class Controller {
         this.notifications = null;
         this.apps = null;
         this.diagnosis = null;
+        this.calls = null;
+        this.sms = null;
+        this.watching = false;
         this.busy = new Set();
 
         this._mirror = null;
@@ -343,6 +346,25 @@ class Controller {
         this._lastInfo = 0;
         this._scopeBroken = false;
         this._notifSource = null;
+        this._phoneSource = null;
+        this._watch = null;
+        this._settingsHandlers = [];
+
+        // Tempo real: liga/desliga na hora pelo switch
+        this._settingsHandlers.push(this._settings.connect('changed::live-sync', () => {
+            if (this._settings.get_boolean('live-sync'))
+                this.startWatch();
+            else
+                this.stopWatch();
+        }));
+
+        // Não perturbe do GNOME → celular (por evento de GSettings, nunca polling)
+        this._desktopNotif = null;
+        const schema = Gio.SettingsSchemaSource.get_default()?.lookup('org.gnome.desktop.notifications', true);
+        if (schema) {
+            this._desktopNotif = new Gio.Settings({settings_schema: schema});
+            this._dndHandler = this._desktopNotif.connect('changed::show-banners', () => this._onDesktopDnd());
+        }
 
         this._netMonitor = Gio.NetworkMonitor.get_default();
         this._netHandler = this._netMonitor.connect('network-changed', (_m, available) => {
@@ -619,6 +641,8 @@ class Controller {
                 this._retry = 0;
                 if (this.device)
                     this.device.online = true;
+                if (this._settings.get_boolean('live-sync'))
+                    this.startWatch();
             }
             this._setState(msg.state);
             this._changed(msg.state === 'pairing' && msg.qr ? 'qr' : null);
@@ -714,7 +738,7 @@ class Controller {
     }
 
     // ---- ações curtas
-    runAction(name, {args = [], onDone = null, quiet = false} = {}) {
+    runAction(name, {args = [], onDone = null, quiet = false, announce = false} = {}) {
         if (this._destroyed)
             return;
         if (this._jobs.size >= MAX_JOBS) {
@@ -751,6 +775,12 @@ class Controller {
                     } else if (msg.event === 'apps') {
                         this.apps = msg.items;
                         this._changed('apps');
+                    } else if (msg.event === 'calls') {
+                        this.calls = msg.items;
+                        this._changed('calls');
+                    } else if (msg.event === 'sms') {
+                        this.sms = msg.items;
+                        this._changed('sms');
                     } else if (msg.event === 'check') {
                         this.diagnosis ??= {items: []};
                         this.diagnosis.items.push(msg);
@@ -769,12 +799,16 @@ class Controller {
                         return;
                     if (timedOut)
                         result = {ok: false, text: _('A ação demorou demais e foi cancelada')};
+                    if (name === 'dnd' && result && this.device && typeof result.dnd === 'boolean')
+                        this.device.dnd = result.dnd;
                     else if (!result && name !== 'diagnose')
                         result = {ok: status === 0, text: status === 0 ? '' : _('A ação falhou')};
                     if (name === 'diagnose' && this.diagnosis) {
                         const d = this.diagnosis;
                         this.notify(d.text || _('Diagnóstico concluído'), d.hint || '',
                             d.code ? 'dialog-warning-symbolic' : 'object-select-symbolic');
+                    } else if (result?.ok && announce && result.text) {
+                        this.notify(result.text, result.hint || '', 'object-select-symbolic');
                     } else if (result && !result.ok && !quiet) {
                         const info = result.code ? errorInfo(result.code, result.text, result.hint)
                             : {text: result.text || _('A ação falhou'), hint: result.hint || ''};
@@ -816,6 +850,7 @@ class Controller {
 
     forget() {
         this.stop();
+        this.stopWatch();
         this.runAction('forget', {
             onDone: () => {
                 this.device = null;
@@ -857,6 +892,95 @@ class Controller {
         }
         this._appJobs.add(job);
         this.notify(fmt(_('Abrindo %s…'), app.label), _('O app vai abrir numa janela própria, numa tela virtual do celular.'), 'view-app-grid-symbolic');
+    }
+
+    // ---- tempo real (por evento: o backend fica bloqueado lendo o logcat de eventos)
+    startWatch() {
+        if (this._destroyed || this._watch || !this.paired || !GLib.file_test(BACKEND, GLib.FileTest.EXISTS))
+            return;
+        const now = GLib.get_monotonic_time() / 1e6;
+        if (this._watchBlockedUntil && now < this._watchBlockedUntil)
+            return;
+        let job;
+        try {
+            job = new Job(this._argv(['watch', '--serial', this.device.serial]), {
+                onMessage: msg => {
+                    if (this._destroyed || job !== this._watch)
+                        return;
+                    if (msg.event === 'watching') {
+                        this.watching = true;
+                        if (this.device)
+                            this.device.online = true;
+                    } else if (msg.event === 'battery' && this.device) {
+                        this.device.battery = msg.level;
+                    } else if (msg.event === 'notification') {
+                        this._notifyPhone(msg);
+                        return;
+                    } else if (msg.event === 'offline' && this.device && !this.running) {
+                        this.device.online = false;
+                    }
+                    this._changed();
+                },
+                onExit: () => {
+                    if (job !== this._watch)
+                        return;
+                    this._watch = null;
+                    this.watching = false;
+                    // saiu rápido (celular fora da rede): não tenta de novo por 1 min
+                    if (GLib.get_monotonic_time() / 1e6 - job.startedAt < 15)
+                        this._watchBlockedUntil = GLib.get_monotonic_time() / 1e6 + 60;
+                    this._changed();
+                },
+            });
+        } catch (e) {
+            logError(e, 'celular: falha ao iniciar o tempo real');
+            return;
+        }
+        this._watch = job;
+    }
+
+    stopWatch() {
+        const job = this._watch;
+        this._watch = null;
+        this._watchBlockedUntil = 0;
+        job?.stop();
+        this.watching = false;
+        this._changed();
+    }
+
+    _notifyPhone(n) {
+        if (this._destroyed)
+            return;
+        try {
+            if (!this._phoneSource) {
+                this._phoneSource = new MessageTray.Source({
+                    title: this.device?.name || _('Celular'),
+                    iconName: 'phone-symbolic',
+                });
+                this._phoneSource.connect('destroy', () => {
+                    this._phoneSource = null;
+                });
+                Main.messageTray.add(this._phoneSource);
+            }
+            const title = n.title ? `${n.app} · ${n.title}` : n.app;
+            this._phoneSource.addNotification(new MessageTray.Notification({
+                source: this._phoneSource, title, body: n.text || '', iconName: 'phone-symbolic',
+            }));
+        } catch (e) {
+            logError(e, 'celular: falha ao mostrar notificação do celular');
+        }
+    }
+
+    setDnd(on) {
+        this.runAction('dnd', {args: ['--', on ? 'on' : 'off'], announce: true});
+    }
+
+    _onDesktopDnd() {
+        if (!this._settings?.get_boolean('sync-dnd') || !this.paired || !this._desktopNotif)
+            return;
+        // show-banners = false é o "Não perturbe" do GNOME
+        const dnd = !this._desktopNotif.get_boolean('show-banners');
+        this.runAction('dnd', {args: ['--', dnd ? 'on' : 'off'], quiet: true});
     }
 
     // ---- notificações
@@ -908,6 +1032,8 @@ class Controller {
         this._destroyed = true;
         this._listeners.clear();
         this._stopMirror();
+        this._watch?.stop();
+        this._watch = null;
         for (const job of [...this._jobs, ...this._appJobs])
             job.stop();
         this._jobs.clear();
@@ -919,8 +1045,18 @@ class Controller {
             this._netMonitor.disconnect(this._netHandler);
             this._netHandler = 0;
         }
+        for (const id of this._settingsHandlers)
+            this._settings.disconnect(id);
+        this._settingsHandlers = [];
+        if (this._dndHandler) {
+            this._desktopNotif.disconnect(this._dndHandler);
+            this._dndHandler = 0;
+        }
+        this._desktopNotif = null;
         this._notifSource?.destroy(MessageTray.NotificationDestroyedReason.SOURCE_CLOSED);
         this._notifSource = null;
+        this._phoneSource?.destroy(MessageTray.NotificationDestroyedReason.SOURCE_CLOSED);
+        this._phoneSource = null;
         this._settings = null;
     }
 }
@@ -997,7 +1133,20 @@ class Indicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._sendItem);
 
         this._buildNotificationsMenu();
+        this._buildCallsMenu();
+        this._buildSmsMenu();
         this._buildAppsMenu();
+
+        this._dndItem = new PopupMenu.PopupSwitchMenuItem(_('Não perturbe no celular'), false);
+        this._dndItem.connect('toggled', (_i, on) => {
+            if (!this._syncing)
+                this._ctl.setDnd(on);
+        });
+        this.menu.addMenuItem(this._dndItem);
+
+        this._hotspotItem = new PopupMenu.PopupImageMenuItem(_('Ponto de acesso do celular…'), 'network-wireless-hotspot-symbolic');
+        this._hotspotItem.connect('activate', () => this._ctl.runAction('hotspot', {announce: true}));
+        this.menu.addMenuItem(this._hotspotItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._buildOptionsMenu();
@@ -1304,6 +1453,145 @@ class Indicator extends PanelMenu.Button {
         return undefined;
     }
 
+    // Diálogo simples (zenity) fora do processo do Shell; cb(texto|null)
+    _zenity(args, cb) {
+        if (!GLib.find_program_in_path('zenity')) {
+            this._ctl.notifyError({text: _('Diálogo indisponível'), hint: _('Instale o zenity: sudo dnf install zenity')});
+            return;
+        }
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(['zenity', ...args],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
+        } catch (e) {
+            logError(e, 'celular: falha ao abrir o zenity');
+            return;
+        }
+        proc.communicate_utf8_async(null, null, (p, res) => {
+            let out = null;
+            try {
+                const [, stdout] = p.communicate_utf8_finish(res);
+                out = p.get_successful() ? (stdout || '').replace(/\n$/, '') : null;
+            } catch (e) { /* cancelado */ }
+            if (!this._destroyed && out !== null)
+                cb(out);
+        });
+    }
+
+    _askCall(number = '') {
+        this._zenity(['--entry', `--title=${_('Ligar pelo celular')}`,
+            `--text=${_('Número de telefone (a conversa é pelo celular):')}`, `--entry-text=${number}`], n => {
+            if (n.trim())
+                this._ctl.runAction('call', {args: ['--', n.trim()], announce: true});
+        });
+    }
+
+    _askSms(number = '') {
+        const send = (num) => this._zenity(['--entry', `--title=${_('Mensagem para %s').replace('%s', num)}`,
+            `--text=${_('Texto da mensagem (você confirma o envio no celular):')}`], text => {
+            if (text.trim())
+                this._ctl.runAction('sms-send', {args: ['--', num, text], announce: true});
+        });
+        if (number) {
+            send(number);
+            return;
+        }
+        this._zenity(['--entry', `--title=${_('Nova mensagem')}`, `--text=${_('Número de telefone:')}`], n => {
+            if (n.trim())
+                send(n.trim());
+        });
+    }
+
+    _buildCallsMenu() {
+        this._callsMenu = new PopupMenu.PopupSubMenuMenuItem(_('Chamadas'), true);
+        this._callsMenu.icon.icon_name = 'call-start-symbolic';
+        const add = (label, icon, cb) => {
+            const it = new PopupMenu.PopupImageMenuItem(label, icon);
+            it.connect('activate', cb);
+            this._callsMenu.menu.addMenuItem(it);
+        };
+        add(_('Ligar para…'), 'call-start-symbolic', () => this._askCall());
+        add(_('Atender'), 'call-start-symbolic', () => this._ctl.runAction('answer'));
+        add(_('Desligar'), 'call-stop-symbolic', () => this._ctl.runAction('hangup'));
+        this._callsSection = new PopupMenu.PopupMenuSection();
+        this._callsMenu.menu.addMenuItem(this._callsSection);
+        this._callsMenu.menu.connect('open-state-changed', (_m, open) => {
+            if (open && !this._destroyed && !this._ctl.busy.has('calllog'))
+                this._ctl.runAction('calllog', {quiet: true});
+        });
+        this.menu.addMenuItem(this._callsMenu);
+        this._fillCalls();
+    }
+
+    _fillCalls() {
+        this._callsSection.removeAll();
+        const items = this._ctl.calls;
+        const muted = text => {
+            const it = new PopupMenu.PopupMenuItem(text, {reactive: false, can_focus: false});
+            it.label.add_style_class_name('cel-muted');
+            this._callsSection.addMenuItem(it);
+        };
+        if (!items)
+            return muted(this._ctl.busy.has('calllog') ? _('Carregando histórico…') : _('Histórico: o Android pode não permitir a leitura'));
+        if (!items.length)
+            return muted(_('Nenhuma chamada recente'));
+        for (const c of items.slice(0, 10)) {
+            const who = c.name || c.number || _('Desconhecido');
+            const it = new PopupMenu.PopupMenuItem(`${who} · ${c.kind || ''} · ${fmtWhen(c.date)}`);
+            if (c.kind === 'perdida')
+                it.label.add_style_class_name('cel-error');
+            if (c.number)
+                it.connect('activate', () => this._askCall(c.number));
+            this._callsSection.addMenuItem(it);
+        }
+        return undefined;
+    }
+
+    _buildSmsMenu() {
+        this._smsMenu = new PopupMenu.PopupSubMenuMenuItem(_('Mensagens (SMS)'), true);
+        this._smsMenu.icon.icon_name = 'mail-unread-symbolic';
+        const newItem = new PopupMenu.PopupImageMenuItem(_('Nova mensagem…'), 'mail-send-symbolic');
+        newItem.connect('activate', () => this._askSms());
+        this._smsMenu.menu.addMenuItem(newItem);
+        this._smsSection = new PopupMenu.PopupMenuSection();
+        this._smsMenu.menu.addMenuItem(this._smsSection);
+        this._smsMenu.menu.connect('open-state-changed', (_m, open) => {
+            if (open && !this._destroyed && !this._ctl.busy.has('sms-list'))
+                this._ctl.runAction('sms-list', {quiet: true});
+        });
+        this.menu.addMenuItem(this._smsMenu);
+        this._fillSms();
+    }
+
+    _fillSms() {
+        this._smsSection.removeAll();
+        const items = this._ctl.sms;
+        const muted = text => {
+            const it = new PopupMenu.PopupMenuItem(text, {reactive: false, can_focus: false});
+            it.label.add_style_class_name('cel-muted');
+            this._smsSection.addMenuItem(it);
+        };
+        if (!items) {
+            muted(this._ctl.busy.has('sms-list') ? _('Carregando mensagens…')
+                : _('Ler SMS: o Android pode não permitir — as novas aparecem em Notificações'));
+            return;
+        }
+        if (!items.length) {
+            muted(_('Nenhuma mensagem'));
+            return;
+        }
+        for (const m of items.slice(0, 10)) {
+            const it = new PopupMenu.PopupBaseMenuItem({style_class: 'cel-notif'});
+            const col = new St.BoxLayout({vertical: true, x_expand: true});
+            col.add_child(this._label(`${m.unread ? '● ' : ''}${m.number} · ${fmtWhen(m.date)}`, 'cel-notif-title'));
+            col.add_child(this._label(m.text, 'cel-notif-text', true));
+            it.add_child(col);
+            if (m.number)
+                it.connect('activate', () => this._askSms(m.number));
+            this._smsSection.addMenuItem(it);
+        }
+    }
+
     // ---- apps do celular em janela própria (scrcpy --new-display --start-app)
     _buildAppsMenu() {
         this._appsMenu = new PopupMenu.PopupSubMenuMenuItem(_('Abrir app do celular em janela'), true);
@@ -1378,6 +1666,8 @@ class Indicator extends PanelMenu.Button {
         addSwitch('fullscreen', _('Abrir em tela cheia'));
         addSwitch('always-on-top', _('Janela sempre no topo'));
         addSwitch('auto-reconnect', _('Reconectar quando o celular voltar'));
+        addSwitch('live-sync', _('Tempo real (notificações e bateria)'));
+        addSwitch('sync-dnd', _('Não perturbe junto com o PC'));
         sub.menu.addMenuItem(new PopupMenu.PopupMenuItem(_('Valem na próxima vez que abrir a tela.'), {reactive: false, can_focus: false}));
         this.menu.addMenuItem(sub);
     }
@@ -1417,7 +1707,7 @@ class Indicator extends PanelMenu.Button {
             pill = _('Erro');
             pillCls = 'cel-error';
         } else if (dev) {
-            pill = dev.online ? _('Online') : _('Offline');
+            pill = c.watching ? _('Online · tempo real') : dev.online ? _('Online') : _('Offline');
             pillCls = dev.online ? 'cel-on' : 'cel-off';
         }
         this._pill.text = pill;
@@ -1531,8 +1821,12 @@ class Indicator extends PanelMenu.Button {
 
         // controles só com celular conhecido
         const canAct = Boolean(dev);
-        for (const it of [this._actionsSep, this._actionsItem, this._sendItem, this._notifMenu, this._appsMenu])
+        for (const it of [this._actionsSep, this._actionsItem, this._sendItem, this._notifMenu, this._appsMenu,
+            this._callsMenu, this._smsMenu, this._dndItem, this._hotspotItem])
             it.visible = canAct;
+        this._syncing = true;
+        this._dndItem.setToggleState(Boolean(dev?.dnd));
+        this._syncing = false;
         this._forgetItem.visible = Boolean(dev);
         this._pairItem.visible = Boolean(dev) && !c.running;
         this._diagItem.visible = !c.running;
@@ -1543,6 +1837,10 @@ class Indicator extends PanelMenu.Button {
             this._fillNotifications();
         if (reason === 'apps')
             this._fillApps();
+        if (reason === 'calls' || reason === 'calllog')
+            this._fillCalls();
+        if (reason === 'sms' || reason === 'sms-list')
+            this._fillSms();
         if (reason === 'qr')
             this._openForQr();
     }

@@ -42,7 +42,15 @@ PC e celular precisam estar **no mesmo Wi-Fi**. Depois disso é só clicar em
   Câmera, Captura de tela (salva em `~/Imagens/Celular`), mídia (anterior/tocar/
   próxima) e **Última foto** (copia a foto/print mais recente do celular).
 - **Enviar arquivos para o celular…** (seletor do zenity → pasta Download).
-- **Notificações do celular** (lidas sob demanda ao abrir o submenu).
+- **Notificações do celular** (lidas sob demanda ao abrir o submenu) e, com
+  **Tempo real** ligado, as novas aparecem como notificação do GNOME na hora.
+- **Chamadas**: ligar para um número (ou abrir o discador preenchido), atender,
+  desligar e histórico (se o Android deixar o adb ler). A conversa é pelo celular.
+- **Mensagens (SMS)**: nova mensagem/responder abre o app de mensagens do celular já
+  preenchido — você confirma o envio na tela do celular; lista das recebidas se o
+  Android permitir (senão, elas chegam por Notificações).
+- **Não perturbe no celular** (switch) e, opcionalmente, junto com o do GNOME.
+- **Ponto de acesso do celular…** (abre os ajustes de hotspot no celular).
 - **Abrir app do celular em janela** (`scrcpy --new-display --start-app`).
 - **Diagnosticar conexão**, **Esquecer este celular**, **Opções** e **Configurações**.
 
@@ -111,11 +119,13 @@ Wayland). As proteções agora são:
 | Emparelhamento por QR com passos numerados | ✅ igual | QR de "Depuração por Wi-Fi" |
 | Tela de erro/desconectado com "Tentar novamente" e dicas (mesmo Wi-Fi, AP isolation, VPN, economia de energia) | ✅ igual | com diagnóstico automático |
 | Reconexão automática | ✅ parcial | opcional, por evento, poucas tentativas |
-| Mensagens (SMS) | ❌ | exigiria app companheiro no celular (sem API via adb sem root) |
-| Chamadas | ❌ | exige Bluetooth HFP/app companheiro |
-| Ponto de acesso instantâneo | ❌ | exige app companheiro/Bluetooth |
-| Não perturbe sincronizado | ❌ | sem API estável via adb |
-| Sincronização em tempo real (sem abrir o menu) | ❌ de propósito | evitar polling constante; nada roda com a tela fechada |
+| Notificações em tempo real | ✅ parcial | opcional, **por evento** (`logcat -b events` bloqueado esperando `notification_enqueue`), sem polling; sem responder/dispensar |
+| Bateria ao vivo | ✅ parcial | pelo evento `battery_level` enquanto o tempo real está ligado |
+| Mensagens (SMS) | ✅ parcial | enviar = app de mensagens do celular preenchido (confirmação no celular); ler a caixa só se o Android der `READ_SMS` ao adb — na maioria dos aparelhos novos não dá, aí as novas chegam por Notificações |
+| Chamadas | ✅ parcial | ligar/atender/desligar e histórico (se permitido); **áudio da chamada fica no celular** (o scrcpy não manda o microfone do PC) |
+| Não perturbe sincronizado | ✅ parcial | `cmd notification set_dnd` (conferido em `zen_mode`); se o aparelho recusar, abre a tela de Não perturbe; sincroniza GNOME → celular, não o contrário |
+| Ponto de acesso instantâneo | ✅ parcial | abre os ajustes de hotspot no celular; ligar sozinho exigiria privilégio de sistema |
+| Responder notificação / arrastar arquivos / galeria completa | ❌ | exigiriam app companheiro no celular |
 
 ## Testes
 
