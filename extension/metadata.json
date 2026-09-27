@@ -10,5 +10,9 @@
     "49",
     "50"
   ],
-  "settings-schema": "org.gnome.shell.extensions.celular"
+  "settings-schema": "org.gnome.shell.extensions.celular",
+  "session-modes": [
+    "user",
+    "unlock-dialog"
+  ]
 }

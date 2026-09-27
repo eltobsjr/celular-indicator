@@ -23,7 +23,7 @@ const QR_SIZE = 220;
 // timeout para tudo.
 const PHASE_TIMEOUT = {searching: 75, connecting: 75, pairing: 215}; // s sem notícia → mata
 const ACTION_TIMEOUT = {push: 1900, 'pull-photo': 200, apps: 60, notifications: 30,
-    screenshot: 30, diagnose: 90, info: 25, forget: 15};
+    screenshot: 30, diagnose: 90, info: 25, forget: 15, dnd: 40, hotspot: 40};
 const RETRY_DELAYS = [15, 45, 120];  // reconexão automática: só 3 tentativas
 const FAIL_WINDOW_S = 60;            // anti-laço: 3 falhas de partida em 60 s…
 const FAIL_MAX = 3;
@@ -68,7 +68,7 @@ const ERRORS = {
     connection_lost: ['A conexão com o celular caiu', 'O celular saiu do Wi-Fi, bloqueou ou entrou em economia de energia.'],
     encoder_error: ['O celular não conseguiu codificar o vídeo', 'Diminua a resolução máxima nas Configurações (ex.: 1024).'],
     video_output_error: ['Não foi possível abrir a janela de vídeo no PC', 'Nas Configurações, troque o renderizador para «software».'],
-    audio_failed: ['Sem som do celular', 'O áudio precisa de Android 11+. O espelhamento continua só com vídeo.'],
+    audio_failed: ['Sem som do celular', 'O áudio precisa de Android 11+ e de uma saída de som no PC. O espelhamento continua só com vídeo.'],
     phone_asleep: ['A tela do celular está apagada', 'Se a imagem não aparecer, desbloqueie o celular.'],
     resource_memory: ['O espelhamento foi encerrado por usar memória demais', 'Proteção contra travamento. Diminua a resolução/FPS nas Configurações.'],
     resource_cpu: ['O espelhamento foi encerrado por usar CPU demais', 'Proteção contra travamento. Diminua a resolução/FPS nas Configurações.'],
@@ -481,8 +481,11 @@ class Controller {
         a.push('--max-size', String(s.get_int('max-size')),
             '--max-fps', String(s.get_int('max-fps')),
             '--bit-rate', String(s.get_int('bit-rate')),
-            '--render-driver', s.get_string('render-driver'),
-            '--memory-limit', String(s.get_int('memory-limit')));
+            '--render-driver', s.get_string('render-driver'));
+        if (s.get_boolean('resource-limits'))
+            a.push('--memory-limit', String(s.get_int('memory-limit')));
+        else
+            a.push('--memory-limit', '0', '--cpu-limit', '0'); // 0 = watchdog sem limite
         return a;
     }
 
@@ -851,7 +854,7 @@ class Controller {
                     } else if (result && !result.ok && !quiet) {
                         const info = result.code ? errorInfo(result.code, result.text, result.hint)
                             : {text: result.text || _('A ação falhou'), hint: result.hint || ''};
-                        this.notifyError(info);
+                        this.notifyError(info, true); // ação pedida pelo usuário: falha nunca fica muda
                     }
                     try {
                         onDone?.(result, events);
@@ -891,7 +894,9 @@ class Controller {
         this.stop();
         this.stopWatch();
         this.runAction('forget', {
-            onDone: () => {
+            onDone: r => {
+                if (!r?.ok)
+                    return;
                 this.device = null;
                 this.apps = null;
                 this.notifications = null;
@@ -1048,8 +1053,8 @@ class Controller {
         }
     }
 
-    notifyError(info) {
-        if (!this._settings.get_boolean('show-notifications') || !info)
+    notifyError(info, force = false) {
+        if (!info || (!force && !this._settings.get_boolean('show-notifications')))
             return;
         this.notify(info.text, info.hint, 'dialog-warning-symbolic');
     }
@@ -1552,16 +1557,22 @@ class Indicator extends PanelMenu.Button {
             this._ctl.notifyError({text: _('Seletor de arquivos indisponível'), hint: _('Instale o zenity: sudo dnf install zenity')});
             return;
         }
+        if (this._picker)
+            return;
         let proc;
         try {
+            // --filename: o portal do GNOME guarda a última pasta por app e mostra erro se ela foi movida/apagada
             proc = Gio.Subprocess.new(['zenity', '--file-selection', '--multiple', '--separator=\n',
-                `--title=${_('Enviar para o celular')}`],
+                `--filename=${GLib.get_home_dir()}/`, `--title=${_('Enviar para o celular')}`],
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
         } catch (e) {
             logError(e, 'celular: falha ao abrir o seletor');
             return;
         }
+        this._picker = proc;
         proc.communicate_utf8_async(null, null, (p, res) => {
+            if (this._picker === p)
+                this._picker = null;
             let files = [];
             try {
                 const [, out] = p.communicate_utf8_finish(res);
@@ -1629,6 +1640,8 @@ class Indicator extends PanelMenu.Button {
             this._ctl.notifyError({text: _('Diálogo indisponível'), hint: _('Instale o zenity: sudo dnf install zenity')});
             return;
         }
+        if (this._dialog)
+            return;
         let proc;
         try {
             proc = Gio.Subprocess.new(['zenity', ...args],
@@ -1637,7 +1650,10 @@ class Indicator extends PanelMenu.Button {
             logError(e, 'celular: falha ao abrir o zenity');
             return;
         }
+        this._dialog = proc;
         proc.communicate_utf8_async(null, null, (p, res) => {
+            if (this._dialog === p)
+                this._dialog = null;
             let out = null;
             try {
                 const [, stdout] = p.communicate_utf8_finish(res);
@@ -1802,7 +1818,7 @@ class Indicator extends PanelMenu.Button {
         };
         if (!apps)
             return add(this._ctl.busy.has('apps') ? _('Carregando apps…') : _('Abra para carregar'));
-        const user = apps.filter(a => !a.system).slice(0, 40);
+        const user = apps.filter(a => !a.system);
         if (!user.length)
             return add(_('Nenhum app encontrado'));
         for (const app of user) {
@@ -1817,11 +1833,16 @@ class Indicator extends PanelMenu.Button {
     _buildOptionsMenu() {
         const sub = new PopupMenu.PopupSubMenuMenuItem(_('Opções'), true);
         sub.icon.icon_name = 'emblem-system-symbolic';
-        const addSwitch = (key, text) => {
+        // nextOpen: opções lidas só ao abrir o espelhamento (as demais valem na hora)
+        const addSwitch = (key, text, nextOpen = false) => {
             const item = new PopupMenu.PopupSwitchMenuItem(text, this._settings.get_boolean(key));
             item.connect('toggled', (_i, on) => {
                 if (this._settings.get_boolean(key) !== on)
                     this._settings.set_boolean(key, on);
+                if (nextOpen && this._ctl.state === 'mirroring') {
+                    this._ctl.notify(_('Vale na próxima abertura'),
+                        _('Feche e abra a tela do celular de novo para aplicar esta opção.'), 'view-refresh-symbolic');
+                }
             });
             this._settingsHandlers.push(this._settings.connect(`changed::${key}`, () => {
                 if (!this._destroyed)
@@ -1829,12 +1850,12 @@ class Indicator extends PanelMenu.Button {
             }));
             sub.menu.addMenuItem(item);
         };
-        addSwitch('audio', _('Som do celular no PC'));
-        addSwitch('turn-screen-off', _('Apagar a tela do celular'));
-        addSwitch('stay-awake', _('Manter o celular acordado'));
-        addSwitch('free-resize', _('Redimensionar livremente'));
-        addSwitch('fullscreen', _('Abrir em tela cheia'));
-        addSwitch('always-on-top', _('Janela sempre no topo'));
+        addSwitch('audio', _('Som do celular no PC'), true);
+        addSwitch('turn-screen-off', _('Apagar a tela do celular'), true);
+        addSwitch('stay-awake', _('Manter o celular acordado'), true);
+        addSwitch('free-resize', _('Redimensionar livremente'), true);
+        addSwitch('fullscreen', _('Abrir em tela cheia'), true);
+        addSwitch('always-on-top', _('Janela sempre no topo'), true);
         addSwitch('auto-reconnect', _('Reconectar quando o celular voltar'));
         addSwitch('live-sync', _('Tempo real (notificações e bateria)'));
         addSwitch('sync-dnd', _('Não perturbe junto com o PC'));
@@ -1982,9 +2003,11 @@ class Indicator extends PanelMenu.Button {
         for (const it of [this._actionsSep, this._actionsItem, this._sendItem, this._notifMenu, this._appsMenu,
             this._callsMenu, this._smsMenu, this._dndItem, this._hotspotItem])
             it.visible = canAct;
-        this._syncing = true;
-        this._dndItem.setToggleState(Boolean(dev?.dnd));
-        this._syncing = false;
+        if (!c.busy.has('dnd')) {
+            this._syncing = true;
+            this._dndItem.setToggleState(Boolean(dev?.dnd));
+            this._syncing = false;
+        }
         this._forgetItem.visible = Boolean(dev);
         this._pairItem.visible = Boolean(dev) && !c.running && !c.pairPanel;
         this._diagItem.visible = !c.running;
@@ -2076,6 +2099,10 @@ class Indicator extends PanelMenu.Button {
 
     _onDestroy() {
         this._destroyed = true;
+        this._picker?.force_exit();
+        this._picker = null;
+        this._dialog?.force_exit();
+        this._dialog = null;
         this._unsubscribe?.();
         this._unsubscribe = null;
         if (this._openIdle) {
@@ -2097,6 +2124,12 @@ export default class CelularExtension extends Extension {
         this._controller = new Controller(this);
         this._posHandler = this._settings.connect('changed::panel-position',
             () => this._reposition());
+        // session-modes inclui 'unlock-dialog' para o espelhamento sobreviver ao bloqueio de tela;
+        // o Shell já esconde o indicador nesse modo, e aqui garantimos o menu fechado.
+        this._sessionHandler = Main.sessionMode.connect('updated', () => {
+            if (Main.sessionMode.isLocked)
+                this._indicator?.menu?.close();
+        });
         this._create();
     }
 
@@ -2125,6 +2158,10 @@ export default class CelularExtension extends Extension {
     }
 
     disable() {
+        if (this._sessionHandler) {
+            Main.sessionMode.disconnect(this._sessionHandler);
+            this._sessionHandler = null;
+        }
         if (this._posHandler) {
             this._settings.disconnect(this._posHandler);
             this._posHandler = null;

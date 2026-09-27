@@ -491,7 +491,7 @@ ERRORS = {
     "video_output_error": ("Não foi possível abrir a janela de vídeo no PC",
                            "Nas Configurações, troque o renderizador para «software»."),
     "audio_failed": ("Sem som do celular",
-                     "O áudio precisa de Android 11+. O espelhamento continua só com vídeo."),
+                     "O áudio precisa de Android 11+ e de uma saída de som no PC. O espelhamento continua só com vídeo."),
     "resource_memory": ("O espelhamento foi encerrado por usar memória demais",
                         "Proteção contra travamento. Diminua a resolução/FPS nas Configurações."),
     "resource_cpu": ("O espelhamento foi encerrado por usar CPU demais",
@@ -871,7 +871,7 @@ def gpu_safe_env(env):
         env["__EGL_VENDOR_LIBRARY_FILENAMES"] = ":".join(sorted(mesa))
     env["__GLX_VENDOR_LIBRARY_NAME"] = "mesa"
     env["__NV_PRIME_RENDER_OFFLOAD"] = "0"
-    env["DRI_PRIME"] = "0"
+    env.pop("DRI_PRIME", None)  # "0" é inválido no Mesa 26 (avisa a cada início)
     arch = platform.machine()
     icds = [p for p in glob.glob("/usr/share/vulkan/icd.d/*.json")
             if "nvidia" not in p and (arch in p or not re.search(r"\.(i686|x86_64|aarch64)\.json$", p))]

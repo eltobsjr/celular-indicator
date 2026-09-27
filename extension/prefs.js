@@ -194,7 +194,7 @@ export default class CelularPrefs extends ExtensionPreferences {
 
         const limitsRow = new Adw.SwitchRow({
             title: _('Limitar memória e CPU'),
-            subtitle: _('Roda o espelhamento num escopo systemd com teto de memória, sem swap e com cota de CPU'),
+            subtitle: _('Escopo systemd com teto de memória, sem swap e cota de CPU, mais o watchdog que encerra o scrcpy acima do limite. Desligado, nada disso se aplica'),
         });
         settings.bind('resource-limits', limitsRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         perfGroup.add(limitsRow);
@@ -265,7 +265,7 @@ export default class CelularPrefs extends ExtensionPreferences {
 
         const notifRow = new Adw.SwitchRow({
             title: _('Mostrar notificações de erro'),
-            subtitle: _('Avisa quando não for possível conectar ao celular'),
+            subtitle: _('Avisa quando não for possível conectar ao celular. Falhas de ações que você pede (enviar arquivo, ligar…) sempre aparecem'),
         });
         settings.bind('show-notifications', notifRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         behaviorGroup.add(notifRow);

@@ -675,7 +675,7 @@ def result(action, ok, text="", **extra):
 
 
 def _dest_dir(a, sub="Celular"):
-    base = a.dest or os.path.join(os.path.expanduser("~"), "Imagens")
+    base = os.path.expanduser(a.dest) if a.dest else os.path.join(os.path.expanduser("~"), "Imagens")
     path = base if a.dest else os.path.join(base, sub)
     os.makedirs(path, exist_ok=True)
     return path
@@ -711,7 +711,8 @@ def cmd_action(a):
     if name == "camera":
         res = lib.adb("shell", "am", "start", "-a", "android.media.action.STILL_IMAGE_CAMERA",
                       serial=serial, timeout=10)
-        return result(name, res.ok and "Error" not in res.out, "Câmera aberta no celular")
+        ok = res.ok and "Error" not in res.out
+        return result(name, ok, "Câmera aberta no celular" if ok else "Não foi possível abrir a câmera")
     if name == "screenshot":
         path = os.path.join(_dest_dir(a), time.strftime("Celular %Y-%m-%d %H-%M-%S.png"))
         with open(path, "wb") as f:
@@ -784,7 +785,9 @@ def cmd_action(a):
         # sem permissão de ligar direto: abre o discador já com o número
         res = lib.adb("shell", lib.shell_cmd("am", "start", "-a", "android.intent.action.DIAL",
                                              "-d", f"tel:{number}"), serial=serial, timeout=10)
-        return result(name, res.ok, f"Discador aberto no celular com {number} — toque em ligar")
+        if not res.ok:
+            return result(name, False, "Não foi possível abrir o discador no celular")
+        return result(name, True, f"Discador aberto no celular com {number} — toque em ligar")
     if name == "calllog":
         keys = ["number", "name", "type", "date", "duration"]
         res = lib.adb("shell", lib.shell_cmd("content", "query", "--uri", "content://call_log/calls",

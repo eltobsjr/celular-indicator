@@ -91,7 +91,7 @@
     <key name="resource-limits" type="b">
       <default>true</default>
       <summary>Limitar memória e CPU do espelhamento</summary>
-      <description>Roda o backend/scrcpy num escopo systemd com limite de memória, sem swap e com cota de CPU, além do watchdog.</description>
+      <description>Roda o backend/scrcpy num escopo systemd com limite de memória, sem swap e com cota de CPU, além do watchdog do backend. Desligado, nenhum dos dois encerra o espelhamento.</description>
     </key>
 
     <key name="memory-limit" type="i">

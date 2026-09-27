@@ -290,6 +290,7 @@ class Network(unittest.TestCase):
         self.assertEqual(env["__NV_PRIME_RENDER_OFFLOAD"], "0")
         self.assertNotIn("nvidia", env.get("__EGL_VENDOR_LIBRARY_FILENAMES", ""))
         self.assertNotIn("nvidia", env.get("VK_DRIVER_FILES", ""))
+        self.assertNotIn("DRI_PRIME", lib.gpu_safe_env({"DRI_PRIME": "1"}))  # "0" é inválido no Mesa novo
 
 
 class FakeEnv(unittest.TestCase):
@@ -402,6 +403,29 @@ class BackendProcess(FakeEnv):
         p, msgs = self.backend("action", "home")
         self.assertTrue(msgs[-1]["ok"])
         self.assertIn("-s 192.168.1.42:37123 shell input keyevent 3", self.calls())
+
+    def test_action_camera_failure_reports_failure(self):
+        self.fake("devices", ONLINE)
+        self.fake("shell_am", "Error: Activity not started, unable to resolve Intent")
+        p, msgs = self.backend("action", "camera")
+        self.assertFalse(msgs[-1]["ok"])
+        self.assertNotIn("aberta", msgs[-1]["text"])
+
+    def test_action_call_dialer_failure_reports_failure(self):
+        self.fake("devices", ONLINE)
+        self.fake("shell_am", "erro", rc=1)
+        p, msgs = self.backend("action", "call", "--", "11999998888")
+        self.assertFalse(msgs[-1]["ok"])
+        self.assertNotIn("Discador aberto", msgs[-1]["text"])
+
+    def test_capture_dir_expands_tilde(self):
+        self.fake("devices", ONLINE)
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        p, msgs = self.backend("action", "screenshot", "--dest", "~/caps", env={"HOME": home})
+        self.assertTrue(os.path.isdir(os.path.join(home, "caps")))
+        self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "~")))
+        self.assertEqual(msgs[-1]["text"], "Não foi possível capturar a tela")
 
     def test_action_apps_and_notifications(self):
         self.fake("devices", ONLINE)
