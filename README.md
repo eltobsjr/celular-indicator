@@ -17,6 +17,19 @@ gnome-extensions enable celular@eltobsjr.gmail.com
 No **Wayland** é preciso fazer **logout/login** depois de instalar ou atualizar (o
 `install.sh` não recarrega o Shell nem executa nada).
 
+### Tema e opções (escolhidos na instalação)
+
+O `./install.sh` pergunta no terminal, antes de copiar qualquer coisa:
+
+- **Paleta**: Catppuccin Macchiato (padrão), Frappé ou Mocha, com uma prévia em cores.
+- **Cor de destaque**: 12 opções, ou **seguir o destaque do GNOME** (47+).
+- **Opções da extensão**: posição do ícone, resolução, FPS, qualidade, áudio, renderizador, reconexão automática, notificações em tempo real e limites de recursos.
+
+Nenhuma cor fica escrita no código: o `stylesheet.css` é gerado na instalação a partir da paleta que você escolheu.
+Para refazer as escolhas, rode `./install.sh --reconfigure`. Sem terminal (CI, `curl | bash`) ou com `--yes`,
+vale o que já estava salvo ou o padrão. Também aceita `--palette macchiato|frappe|mocha`, `--accent blue|mauve|…` e `--system-accent`.
+Detalhes do padrão visual em [`docs/DESIGN.md`](docs/DESIGN.md).
+
 ## Primeiro uso (parear uma vez)
 
 1. No celular: **Configurações → Sobre o telefone → Informações do software**.
@@ -69,6 +82,7 @@ O backend classifica o problema e a extensão mostra texto + dica. Os principais
 | Código | O que significa |
 |---|---|
 | `no_network` / `wifi_off` | PC sem rede / Wi-Fi do PC desligado |
+| `network_changed` | O PC trocou de rede desde a última conexão; o IP guardado é da rede antiga (o Android também desliga a Depuração por Wi-Fi ao trocar de rede) |
 | `different_network` | O último IP do celular não está em nenhuma sub-rede do PC (Wi-Fi diferente, 2,4 × 5 GHz, rede de visitante) |
 | `vpn_interference` | VPN (Tailscale, WireGuard…) é a rota padrão do PC |
 | `mdns_unavailable` | A descoberta mDNS do adb não funciona (firewall bloqueando 5353/UDP) |
@@ -86,6 +100,24 @@ O backend classifica o problema e a extensão mostra texto + dica. Os principais
 
 Log detalhado (sobrevive a um reset forçado, grava com `fsync`):
 `~/.local/state/celular/backend.log`.
+
+## Trocou de Wi-Fi? Como a reconexão funciona
+
+O celular e o PC só se enxergam na mesma rede. Quando o PC troca de Wi-Fi, acorda do suspend ou o celular volta:
+
+1. A extensão percebe por **evento** (NetworkManager e o sinal de retomada do systemd), nunca por polling.
+2. Roda uma **sonda leve** (`celular-backend presence`, sem scrcpy): se a rede mudou desde que o servidor
+   `adb` subiu, ele é **reiniciado** (o mDNS embutido do adb não acompanha a troca de interface) — mas só se nenhum
+   aparelho estiver online no adb, para nunca derrubar o Android Studio/Flutter, e no máximo uma vez a cada 5 min —
+   e o celular é procurado por mDNS e pelo último IP:porta.
+3. Achou: o cartão volta a **Online**, o tempo real é religado e, se o espelhamento tinha caído e a opção
+   «Reconectar quando o celular voltar» está ligada, a tela é reaberta.
+4. Não achou: repete 4 vezes com espera crescente (4, 15, 45 e 120 s) enquanto houver rede e, no fim, avisa o motivo.
+   Depois disso só tenta de novo quando algo mudar (rede, menu aberto, PC acordando).
+
+Limite do Android: ao trocar de rede o sistema **desliga a Depuração por Wi-Fi**. Se a sonda disser
+`network_changed` ou `wifi_debug_off`, ligue-a de novo no celular (atalho: ative o bloco «Depuração por Wi-Fi»
+nos Ajustes rápidos, em Opções do desenvolvedor › Blocos de desenvolvimento dos Ajustes rápidos).
 
 ## Segurança contra travamentos
 

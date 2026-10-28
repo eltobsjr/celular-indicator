@@ -452,6 +452,10 @@ ERRORS = {
                      "Use «Parear novo celular» e siga os passos no menu."),
     "phone_not_found": ("Celular não encontrado na rede",
                         "No celular: desbloqueie a tela, confira se a «Depuração por Wi-Fi» está ligada e se ele está no mesmo Wi-Fi do PC."),
+    "network_changed": ("Você trocou de rede desde a última conexão",
+                        "Entre com o celular no mesmo Wi-Fi do PC e ligue de novo a Depuração por Wi-Fi: "
+                        "o Android a desliga sozinho ao trocar de rede (dica: use o bloco «Depuração por "
+                        "Wi-Fi» nos Ajustes rápidos do celular)."),
     "different_network": ("O PC e o celular estão em redes diferentes",
                           "Conecte os dois no mesmo Wi-Fi (atenção a redes 2,4 GHz e 5 GHz com nomes diferentes e a redes de visitante)."),
     "phone_unreachable": ("O celular não responde na rede",
@@ -708,6 +712,83 @@ def wifi_status():
     return {"enabled": enabled, "connected": connected, "ssid": conn_name, "ethernet": ethernet}
 
 
+def net_fingerprint(nets=None, route_iface=None, ssid=None):
+    """Identifica a rede em que o PC está: interface padrão + sub-redes + nome do Wi-Fi.
+
+    Muda quando o PC troca de Wi-Fi/cabo; o servidor adb e o último IP do celular só valem
+    para a rede em que foram obtidos. Retorna "" sem rede."""
+    nets = local_networks() if nets is None else nets
+    lans = lan_networks(nets)
+    if not lans:
+        return ""
+    iface = route_iface if route_iface is not None else default_route_iface()
+    if ssid is None:
+        wifi = wifi_status()
+        ssid = (wifi or {}).get("ssid", "")
+    subnets = ",".join(sorted(str(n.network) for _, n in lans))
+    return f"{iface or '?'}|{subnets}|{ssid or ''}"
+
+
+def _adb_net_file():
+    return os.path.join(state_dir(), "adb-net")
+
+
+def _adb_restart_file():
+    return os.path.join(state_dir(), "adb-restart-at")
+
+
+def adb_restart_allowed(min_gap=300, now=None):
+    """Limita os reinícios "por desespero" do adb a um a cada `min_gap` s: matar o servidor
+    derruba também outras sessões (Android Studio, aparelhos USB)."""
+    now = time.time() if now is None else now
+    try:
+        with open(_adb_restart_file()) as f:
+            last = float(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return True
+    return now - last >= min_gap
+
+
+def note_adb_restart(now=None):
+    try:
+        with open(_adb_restart_file(), "w") as f:
+            f.write(str(time.time() if now is None else now))
+    except OSError:
+        pass
+
+
+def adb_restart_safe():
+    """Só vale reiniciar o servidor adb se NENHUM aparelho estiver online (USB, emulador ou
+    Wi-Fi): o servidor é compartilhado com Android Studio/Flutter e matá-lo derruba esses
+    aparelhos. Com um aparelho online o servidor claramente está funcionando."""
+    return not online(parse_devices(adb("devices", "-l", timeout=8).out))
+
+
+def adb_server_stale(fp):
+    """True se a rede mudou desde que o servidor adb foi (re)iniciado por nós.
+
+    O mDNS embutido do adb não acompanha troca de interface: sem reiniciar o servidor ele
+    segue "ouvindo" a rede antiga e nunca acha o celular na nova."""
+    if not fp:
+        return False
+    try:
+        with open(_adb_net_file()) as f:
+            saved = f.read().strip()
+    except OSError:
+        return False
+    return bool(saved) and saved != fp
+
+
+def remember_adb_net(fp):
+    if not fp:
+        return
+    try:
+        with open(_adb_net_file(), "w") as f:
+            f.write(fp)
+    except OSError:
+        pass
+
+
 def ping(ip, timeout=2):
     return run(["ping", "-c", "1", "-W", str(timeout), "-n", ip], timeout=timeout + 2).ok
 
@@ -744,7 +825,7 @@ def firewall_blocks_mdns():
     return "mdns" not in services.out.split()
 
 
-def diagnose_unreachable(last, nets=None, probe=True):
+def diagnose_unreachable(last, nets=None, probe=True, fp=None):
     """Tenta explicar por que um celular já pareado não apareceu.
 
     Retorna (código, detalhes) em ordem de probabilidade. `last` é o dict salvo.
@@ -760,6 +841,10 @@ def diagnose_unreachable(last, nets=None, probe=True):
     ip = last.get("ip")
     if ip and same_subnet(ip, lans) is False:
         details["phone_ip"] = ip
+        # o PC mudou de rede depois da última conexão: o IP guardado é da rede antiga e o
+        # celular provavelmente também trocou (ou o Android desligou a depuração)
+        if fp and last.get("net") and last["net"] != fp:
+            return "network_changed", details
         return "different_network", details
     if not mdns_ok():
         return "mdns_unavailable", details

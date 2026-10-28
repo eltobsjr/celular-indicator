@@ -5,3 +5,4 @@ extension/schemas/gschemas.compiled
 venv/
 memory/
 CLAUDE.md
+extension/stylesheet.css

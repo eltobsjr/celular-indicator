@@ -102,7 +102,7 @@
 
     <!-- Conexão -->
     <key name="auto-reconnect" type="b">
-      <default>false</default>
+      <default>true</default>
       <summary>Reconectar quando o celular voltar à rede</summary>
       <description>Depois de uma queda de conexão, tenta de novo poucas vezes (15 s, 45 s e 2 min) e quando a rede do PC muda. Nunca fica verificando sem parar.</description>
     </key>

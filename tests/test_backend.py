@@ -666,6 +666,113 @@ class PhoneFeatures(FakeEnv):
         self.assertEqual(events[-1], "offline")
 
 
+class NetworkChange(FakeEnv):
+    """Trocar de Wi-Fi: o servidor adb precisa ser reiniciado e a sonda de presença tem de achar o celular."""
+
+    def test_fingerprint_changes_with_network(self):
+        a = lib.net_fingerprint([net("wlp63s0", "192.168.1.60/24")], route_iface="wlp63s0", ssid="Casa")
+        b = lib.net_fingerprint([net("wlp63s0", "10.0.0.7/24")], route_iface="wlp63s0", ssid="Hotspot")
+        self.assertNotEqual(a, b)
+        self.assertEqual(lib.net_fingerprint([net("wlp63s0", "192.168.1.60/24"), net("docker0", "172.17.0.1/16")],
+                                             route_iface="wlp63s0", ssid="Casa"), a)  # docker não conta
+        self.assertEqual(lib.net_fingerprint([], route_iface=None, ssid=""), "")
+
+    def test_adb_server_stale_lifecycle(self):
+        fp = "wlp63s0|192.168.1.0/24|Casa"
+        self.assertFalse(lib.adb_server_stale(fp))          # nunca registrou: não reinicia à toa
+        lib.remember_adb_net(fp)
+        self.assertFalse(lib.adb_server_stale(fp))
+        self.assertTrue(lib.adb_server_stale("wlp63s0|10.0.0.0/24|Hotspot"))
+        self.assertFalse(lib.adb_server_stale(""))          # sem rede: não decide nada
+
+    def test_adb_restart_is_rate_limited(self):
+        self.assertTrue(lib.adb_restart_allowed(now=1000))
+        lib.note_adb_restart(now=1000)
+        self.assertFalse(lib.adb_restart_allowed(min_gap=300, now=1100))
+        self.assertTrue(lib.adb_restart_allowed(min_gap=300, now=1301))
+
+    def test_presence_absent_phone_restarts_adb_only_once_per_window(self):
+        self._need_lan()
+        lib.save_device({"serial": "10.99.0.5:5555", "ip": "10.99.0.5", "addr": "10.99.0.5:5555", "port": 5555})
+        self.fake("devices", "List of devices attached\n")
+        self.fake("mdns_check", "mdns daemon version [Openscreen discovery 0.0.0]")
+        for _ in range(2):
+            self.backend("presence", "--search-timeout", "8")
+        self.assertEqual(self.calls().count("kill-server"), 1)
+
+    def test_diagnose_network_changed_vs_different_network(self):
+        nets = [net("wlp63s0", "10.0.0.7/24")]
+        last = {"serial": "192.168.1.42:37000", "ip": "192.168.1.42", "port": 37000, "net": "wlp63s0|192.168.1.0/24|Casa"}
+        fp_now = lib.net_fingerprint(nets, route_iface="wlp63s0", ssid="Hotspot")
+        code, _ = lib.diagnose_unreachable(last, nets, probe=False, fp=fp_now)
+        self.assertEqual(code, "network_changed")
+        last_same = dict(last, net=fp_now)                  # o PC não mudou de rede: o celular é que está em outra
+        code, _ = lib.diagnose_unreachable(last_same, nets, probe=False, fp=fp_now)
+        self.assertEqual(code, "different_network")
+
+    def _need_lan(self):
+        if not lib.lan_networks(lib.local_networks()):
+            self.skipTest("sem rede local para o teste")
+
+    def test_presence_never_paired(self):
+        p, msgs = self.backend("presence")
+        self.assertEqual(msgs[-1]["event"], "presence")
+        self.assertFalse(msgs[-1]["online"])
+        self.assertEqual(msgs[-1]["code"], "never_paired")
+
+    def test_presence_finds_phone_and_records_network(self):
+        self._need_lan()
+        lib.save_device({"serial": "192.168.1.42:37000", "ip": "192.168.1.42", "addr": "192.168.1.42:37000",
+                         "port": 37000, "hw_serial": "R5CX123ABC"})
+        self.fake("devices", "List of devices attached\n192.168.1.42:37000\tdevice product:a36xx model:SM_A366B device:a36 transport_id:3\n")
+        p, msgs = self.backend("presence", "--search-timeout", "3")
+        pres = [m for m in msgs if m.get("event") == "presence"]
+        self.assertTrue(pres and pres[-1]["online"], p.stdout + p.stderr)
+        saved = lib.load_device()
+        self.assertTrue(saved["online"])
+        self.assertTrue(saved["net"])
+        self.assertFalse(any(c.startswith("scrcpy") for c in self.calls()))   # sonda leve: nada de scrcpy
+
+    def test_presence_restarts_adb_when_network_changed(self):
+        self._need_lan()
+        lib.save_device({"serial": "192.168.1.42:37000", "ip": "192.168.1.42", "addr": "192.168.1.42:37000", "port": 37000})
+        lib.remember_adb_net("eth0|172.31.0.0/24|OutraRede")                 # servidor subiu em outra rede
+        self.fake("devices", "List of devices attached\n192.168.1.42:37000\toffline product:a36xx model:SM_A366B device:a36 transport_id:3\n")
+        p, msgs = self.backend("presence", "--search-timeout", "3")
+        calls = self.calls()
+        self.assertIn("kill-server", calls, calls)
+        self.assertLess(calls.index("kill-server"), calls.index("start-server"))
+        self.assertFalse(lib.adb_server_stale(lib.net_fingerprint()))        # e passou a valer a rede atual
+
+    def test_presence_never_kills_adb_with_another_device_online(self):
+        self._need_lan()
+        lib.save_device({"serial": "192.168.1.42:37000", "ip": "192.168.1.42", "addr": "192.168.1.42:37000", "port": 37000})
+        lib.remember_adb_net("eth0|172.31.0.0/24|OutraRede")                 # rede mudou…
+        self.fake("devices", "List of devices attached\nemulator-5554\tdevice product:sdk model:sdk_gphone device:emu transport_id:1\n")
+        self.backend("presence", "--search-timeout", "2")                    # …mas há um emulador/Android Studio vivo
+        self.assertNotIn("kill-server", self.calls())
+
+    def test_presence_same_network_keeps_adb_server(self):
+        self._need_lan()
+        lib.save_device({"serial": "192.168.1.42:37000", "ip": "192.168.1.42", "addr": "192.168.1.42:37000", "port": 37000})
+        lib.remember_adb_net(lib.net_fingerprint())
+        self.fake("devices", "List of devices attached\n192.168.1.42:37000\tdevice product:a36xx model:SM_A366B device:a36 transport_id:3\n")
+        self.backend("presence", "--search-timeout", "3")
+        self.assertNotIn("kill-server", self.calls())
+
+    def test_presence_phone_gone_reports_reason(self):
+        self._need_lan()
+        lib.save_device({"serial": "10.99.0.5:5555", "ip": "10.99.0.5", "addr": "10.99.0.5:5555", "port": 5555,
+                         "net": "eth0|10.99.0.0/24|Antiga"})
+        self.fake("devices", "List of devices attached\n")
+        self.fake("mdns_check", "mdns daemon version [Openscreen discovery 0.0.0]")
+        p, msgs = self.backend("presence", "--search-timeout", "2")
+        last = msgs[-1]
+        self.assertFalse(last["online"])
+        self.assertEqual(last["code"], "network_changed", p.stdout)
+        self.assertFalse(lib.load_device()["online"])
+
+
 def _not_zombie(pid):
     try:
         with open(f"/proc/{pid}/stat") as f:

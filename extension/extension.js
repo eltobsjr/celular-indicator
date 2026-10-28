@@ -25,6 +25,11 @@ const PHASE_TIMEOUT = {searching: 75, connecting: 75, pairing: 215}; // s sem no
 const ACTION_TIMEOUT = {push: 1900, 'pull-photo': 200, apps: 60, notifications: 30,
     screenshot: 30, diagnose: 90, info: 25, forget: 15, dnd: 40, hotspot: 40};
 const RETRY_DELAYS = [15, 45, 120];  // reconexão automática: só 3 tentativas
+// Presença (o celular voltou à rede?): depois de uma mudança de rede ou de acordar o PC,
+// 4 sondas leves com espera crescente; passado isso só por evento (rede, menu, retomada).
+const PRESENCE_DELAYS = [4, 15, 45, 120];
+const PRESENCE_GAP_S = 20;           // menu aberto offline: no máximo 1 sonda a cada 20 s
+const PRESENCE_TIMEOUT_S = 45;
 const FAIL_WINDOW_S = 60;            // anti-laço: 3 falhas de partida em 60 s…
 const FAIL_MAX = 3;
 const LOCKOUT_S = 60;                // …bloqueiam novas tentativas por 60 s
@@ -32,7 +37,11 @@ const EARLY_FAIL_S = 30;             // só conta como "falha ao iniciar" se mor
 const MAX_JOBS = 4;
 const INFO_REFRESH_S = 30;
 const RECONNECTABLE = new Set(['connection_lost', 'device_lost', 'phone_not_found',
-    'phone_unreachable', 'server_connection_failed', 'port_changed', 'wifi_debug_off']);
+    'phone_unreachable', 'server_connection_failed', 'port_changed', 'wifi_debug_off',
+    'network_changed', 'different_network']);
+// O que vale avisar o usuário quando a sonda de presença não acha o celular
+const PRESENCE_ACTIONABLE = new Set(['network_changed', 'wifi_debug_off', 'different_network',
+    'phone_unreachable']);
 
 // Tabela de tradução dos códigos do backend (mesmos de backend/celular_lib.py → ERRORS).
 // Strings sem _() aqui: gettext só pode ser chamado depois que a extensão é registrada.
@@ -49,6 +58,7 @@ const ERRORS = {
     mdns_unavailable: ['A descoberta de celulares na rede (mDNS) não está funcionando', 'Libere mDNS no firewall: sudo firewall-cmd --add-service=mdns --permanent && sudo firewall-cmd --reload'],
     never_paired: ['Nenhum celular pareado ainda', 'Use «Parear novo celular» (QR code ou código) e siga os passos abaixo.'],
     phone_not_found: ['Celular não encontrado na rede', 'No celular: desbloqueie a tela, confira se a «Depuração por Wi-Fi» está ligada e se ele está no mesmo Wi-Fi do PC.'],
+    network_changed: ['Você trocou de rede desde a última conexão', 'Entre com o celular no mesmo Wi-Fi do PC e ligue de novo a Depuração por Wi-Fi: o Android a desliga sozinho ao trocar de rede (dica: use o bloco «Depuração por Wi-Fi» nos Ajustes rápidos do celular).'],
     different_network: ['O PC e o celular estão em redes diferentes', 'Conecte os dois no mesmo Wi-Fi (atenção a redes 2,4 GHz e 5 GHz com nomes diferentes e a redes de visitante).'],
     phone_unreachable: ['O celular não responde na rede', 'Desbloqueie o celular e desligue a economia de energia. Se continuar, o roteador pode estar isolando os aparelhos (AP isolation / rede de visitante).'],
     wifi_debug_off: ['A Depuração por Wi-Fi do celular parece desligada', 'No celular: Opções do desenvolvedor → Depuração por Wi-Fi → ligar. Ela desliga sozinha quando o celular troca de rede.'],
@@ -350,6 +360,13 @@ class Controller {
         this._retryTimer = 0;
         this._phaseTimer = 0;
         this._netDebounce = 0;
+        this._presenceJob = null;
+        this._presenceTimer = 0;
+        this._presenceStep = 0;
+        this._lastProbe = 0;
+        this._wasMirroring = false;   // a sessão de espelhamento chegou a abrir
+        this._resumeMirror = false;   // quando o celular voltar, reabre o espelhamento
+        this.presence = null;         // {online, code} da última sonda
         this._lastInfo = 0;
         this._scopeBroken = false;
         this._notifSource = null;
@@ -378,11 +395,21 @@ class Controller {
             this._onNetworkChanged(available);
         });
 
+        // PC acordou do suspend: a rede volta sozinha, mas ninguém avisa o celular nem o adb
+        this._sleepSub = Gio.DBus.system.signal_subscribe('org.freedesktop.login1',
+            'org.freedesktop.login1.Manager', 'PrepareForSleep', '/org/freedesktop/login1', null,
+            Gio.DBusSignalFlags.NONE, (_c, _s, _p, _i, _n, params) => {
+                const [sleeping] = params.deep_unpack();
+                if (!sleeping && !this._destroyed)
+                    this.scheduleProbe({reset: true, delay: 6});
+            });
+
         readJsonAsync(DEVICE_FILE, data => {
             if (this._destroyed || !data?.serial)
                 return;
             this.device = {...data, online: false};
             this._changed();
+            this.scheduleProbe({reset: true, delay: 8});   // ao entrar na sessão: o celular está aí?
         });
     }
 
@@ -621,6 +648,8 @@ class Controller {
         this._pendingTimer = this._clearTimer(this._pendingTimer);
         this._retry = 0;
         this._retryTimer = this._clearTimer(this._retryTimer);
+        this._wasMirroring = false;
+        this._resumeMirror = false;
         this._stopMirror();
         this.error = null;
         this.qr = null;
@@ -675,6 +704,9 @@ class Controller {
             else if (msg.state !== 'pairing')
                 this.qr = null;
             if (msg.state === 'mirroring') {
+                this._wasMirroring = true;
+                this._resumeMirror = false;
+                this.presence = null;
                 this._pairOpts = null;
                 this.pairBy = null;
                 this.pairPanel = false;
@@ -721,6 +753,8 @@ class Controller {
                 this._setState('off');
             }
         }
+        if (this.state !== 'error')
+            this._wasMirroring = false; // o usuário fechou a janela: não reabrir sozinho
         if (this.state === 'error') {
             this._recordFailure(job);
             if (this.error.code === 'backend_crashed' || this.error.code === 'backend_unresponsive')
@@ -751,9 +785,15 @@ class Controller {
     // ---- reconexão automática (só por evento, com poucas tentativas)
     _maybeReconnect() {
         if (!this._settings.get_boolean('auto-reconnect') || !this.paired ||
-            !RECONNECTABLE.has(this.error?.code) || this._retry >= RETRY_DELAYS.length ||
-            this.lockRemaining > 0)
+            !RECONNECTABLE.has(this.error?.code) || this.lockRemaining > 0)
             return;
+        if (this._retry >= RETRY_DELAYS.length) {
+            // As tentativas imediatas acabaram: em vez de desistir, vigia a presença do
+            // celular (por evento) e reabre o espelhamento quando ele voltar.
+            this._resumeMirror = this._wasMirroring;
+            this.scheduleProbe({reset: true});
+            return;
+        }
         const delay = RETRY_DELAYS[this._retry++];
         this._retryTimer = this._clearTimer(this._retryTimer);
         this._retryTimer = this._timeout(delay, () => {
@@ -766,17 +806,117 @@ class Controller {
     }
 
     _onNetworkChanged(available) {
-        if (!available || !this._retryTimer || this.running)
+        if (!available || this._destroyed || !this.paired || this.running)
             return;
-        // rede voltou/mudou com uma reconexão pendente: tenta já (com debounce)
-        this._clearTimer(this._netDebounce);
-        this._netDebounce = this._timeout(5, () => {
+        // A rede mudou (troca de Wi-Fi, volta do cabo, VPN…). Com debounce: o NetworkManager
+        // dispara vários sinais seguidos. Espelhando não faz nada: se o scrcpy cair,
+        // _onMirrorExit cuida.
+        this._netDebounce = this._clearTimer(this._netDebounce);
+        this._netDebounce = this._timeout(4, () => {
             this._netDebounce = 0;
-            if (this._retryTimer && !this.running) {
+            if (this.running)
+                return;
+            if (this._retryTimer) {
+                // havia uma reconexão agendada: tenta já
                 this._retryTimer = this._clearTimer(this._retryTimer);
                 this.start({manual: false});
+            } else {
+                this.scheduleProbe({reset: true});
             }
         });
+    }
+
+    // ---- presença: o celular está na rede? (sonda leve do backend, sem scrcpy)
+    scheduleProbe({reset = false, delay = null} = {}) {
+        if (this._destroyed || !this.paired)
+            return;
+        if (reset)
+            this._presenceStep = 0;
+        this._presenceTimer = this._clearTimer(this._presenceTimer);
+        const wait = delay ?? PRESENCE_DELAYS[Math.min(this._presenceStep, PRESENCE_DELAYS.length - 1)];
+        this._presenceTimer = this._timeout(wait, () => {
+            this._presenceTimer = 0;
+            this._runProbe();
+        });
+    }
+
+    /** Menu aberto com o celular offline: uma sonda, no máximo a cada PRESENCE_GAP_S. */
+    probeIfOffline() {
+        const now = GLib.get_monotonic_time() / 1e6;
+        if (this._destroyed || !this.paired || this.running || this.device?.online ||
+            this._presenceJob || this._presenceTimer || now - this._lastProbe < PRESENCE_GAP_S)
+            return;
+        this.scheduleProbe({delay: 0});
+    }
+
+    _runProbe() {
+        if (this._destroyed || this.running || this._presenceJob || !this.paired ||
+            !GLib.file_test(BACKEND, GLib.FileTest.EXISTS))
+            return;
+        this._lastProbe = GLib.get_monotonic_time() / 1e6;
+        let job;
+        try {
+            job = new Job(this._argv(['presence']), {
+                timeout: PRESENCE_TIMEOUT_S,
+                onMessage: msg => {
+                    if (!this._destroyed && job === this._presenceJob)
+                        this._onPresence(msg);
+                },
+                onExit: (_status, timedOut) => {
+                    if (job !== this._presenceJob)
+                        return;
+                    this._presenceJob = null;
+                    if (timedOut && !this._destroyed)
+                        this._onPresence({event: 'presence', online: false, code: 'phone_not_found'});
+                },
+            });
+        } catch (e) {
+            logError(e, 'celular: falha ao iniciar a sonda de presença');
+            return;
+        }
+        this._presenceJob = job;
+    }
+
+    _onPresence(msg) {
+        if (msg.event === 'device') {
+            this.device = {...msg.device, online: true};
+            this._changed();
+            return;
+        }
+        if (msg.event !== 'presence')
+            return;
+        if (msg.online) {
+            this._presenceStep = 0;
+            this._presenceTimer = this._clearTimer(this._presenceTimer);
+            this.presence = {online: true, code: null};
+            if (this.device)
+                this.device.online = true;
+            if (this.state === 'error' && RECONNECTABLE.has(this.error?.code)) {
+                this.error = null;
+                this._setState('off');
+            }
+            if (this._resumeMirror && this._settings.get_boolean('auto-reconnect') && !this.running) {
+                this._resumeMirror = false;
+                this.start({manual: false});   // o celular voltou: reabre a tela
+            } else if (this._settings.get_boolean('live-sync')) {
+                this.startWatch();
+            }
+            this._changed();
+            return;
+        }
+        if (this.device)
+            this.device.online = false;
+        this.presence = {online: false, code: msg.code};
+        const more = this._presenceStep < PRESENCE_DELAYS.length - 1 && this._netMonitor.network_available;
+        if (more) {
+            this._presenceStep++;
+            this.scheduleProbe();
+        } else if (this._presenceStep === PRESENCE_DELAYS.length - 1 && PRESENCE_ACTIONABLE.has(msg.code)) {
+            this._presenceStep++;          // avisa uma vez por episódio
+            const info = errorInfo(msg.code);
+            this.notify(info.text, info.hint, 'network-wireless-offline-symbolic');
+        }
+        this._changed();
     }
 
     // ---- ações curtas
@@ -971,8 +1111,13 @@ class Controller {
                     this._watch = null;
                     this.watching = false;
                     // saiu rápido (celular fora da rede): não tenta de novo por 1 min
-                    if (GLib.get_monotonic_time() / 1e6 - job.startedAt < 15)
+                    const fast = GLib.get_monotonic_time() / 1e6 - job.startedAt < 15;
+                    if (fast)
                         this._watchBlockedUntil = GLib.get_monotonic_time() / 1e6 + 60;
+                    // O tempo real termina quando o celular sai da rede. Em vez de ficar
+                    // morto até a próxima sessão, a sonda de presença o religa ao voltar.
+                    if (!this._destroyed && this._settings.get_boolean('live-sync') && !this.running)
+                        this.scheduleProbe({reset: true, delay: fast ? 65 : 5});
                     this._changed();
                 },
             });
@@ -1078,6 +1223,12 @@ class Controller {
         this._stopMirror();
         this._watch?.stop();
         this._watch = null;
+        this._presenceJob?.stop();
+        this._presenceJob = null;
+        if (this._sleepSub) {
+            Gio.DBus.system.signal_unsubscribe(this._sleepSub);
+            this._sleepSub = 0;
+        }
         for (const job of [...this._jobs, ...this._appJobs])
             job.stop();
         this._jobs.clear();
@@ -1154,8 +1305,10 @@ class Indicator extends PanelMenu.Button {
         this._buildMenu();
         this._unsubscribe = controller.subscribe(reason => this._sync(reason));
         this.menu.connect('open-state-changed', (_m, open) => {
-            if (open && !this._destroyed)
+            if (open && !this._destroyed) {
                 this._ctl.refreshInfo();
+                this._ctl.probeIfOffline();
+            }
         });
         this._sync();
     }
@@ -1926,6 +2079,9 @@ class Indicator extends PanelMenu.Button {
             seen = fmt(_('Visto por último %s'), fmtWhen(dev.last_seen || dev.connected_at || dev.updated_at));
         if (dev?.battery !== undefined && c.state !== 'mirroring')
             seen += seen ? _(' · bateria de quando conectou') : '';
+        if (dev && !dev.online && !c.running && c.presence && !c.presence.online &&
+            PRESENCE_ACTIONABLE.has(c.presence.code))
+            seen = errorInfo(c.presence.code).text;
         this._cardSeen.text = seen;
         this._cardSeen.visible = Boolean(seen);
 

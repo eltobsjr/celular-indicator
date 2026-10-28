@@ -15,15 +15,6 @@ install:
 schema:
 	@glib-compile-schemas --strict $(EXT)/schemas
 
-# Checagem estática: sintaxe JS/Python e schema (não executa nada de verdade)
-check:
-	@d=$$(mktemp -d); for f in $(EXT)/extension.js $(EXT)/prefs.js; do \
-		cp $$f $$d/x.mjs && node --check $$d/x.mjs || { rm -rf $$d; exit 1; }; done; rm -rf $$d
-	@python3 -m py_compile backend/celular_lib.py
-	@python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" backend/celular backend/celular-backend
-	@glib-compile-schemas --strict --dry-run $(EXT)/schemas
-	@echo "check ok"
-
 # Testes do backend com adb/scrcpy falsos (não toca no celular nem no servidor adb real)
 test:
 	@python3 -m unittest discover -s tests -v
@@ -39,13 +30,26 @@ uninstall:
 	@rm -rf "$(DEST)" "$(DATA)" "$(STATE)" "$(HOME)/.local/bin/celular"
 	@echo "Removido."
 
-# Gera o .zip só da extensão (o backend é instalado pelo install.sh)
-pack: schema
-	@cd $(EXT) && zip -r -FS ../$(UUID).shell-extension.zip . \
-		-x 'schemas/gschemas.compiled'
+# Checagem estática: sintaxe JS/Python/JSON, schema e o tema (todas as paletas e cores de destaque)
+check:
+	@d=$$(mktemp -d); for f in $$(find $(EXT) -name '*.js'); do \
+		cp $$f $$d/x.mjs && node --check $$d/x.mjs || { rm -rf $$d; exit 1; }; done; rm -rf $$d
+	@python3 -m py_compile scripts/eltob-setup.py backend/celular_lib.py && rm -rf scripts/__pycache__ backend/__pycache__
+	@python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" backend/celular backend/celular-backend
+	@python3 -c "import json; [json.load(open(f)) for f in ('$(EXT)/metadata.json','scripts/options.json','scripts/palettes.json')]"
+	@if [ -d $(EXT)/schemas ]; then glib-compile-schemas --strict --dry-run $(EXT)/schemas; fi
+	@d=$$(mktemp -d); for p in macchiato frappe mocha; do for a in blue mauve green red; do \
+		python3 scripts/eltob-setup.py render --template $(EXT)/stylesheet.tpl.css --out $$d/s.css --palette $$p --accent $$a || exit 1; \
+		! grep -q '{{' $$d/s.css || { echo "token sem valor ($$p/$$a)"; exit 1; }; done; done; rm -rf $$d
+	@echo "check ok"
+
+# Gera o .zip só da extensão, com o tema padrão (Macchiato/azul) já renderizado
+pack:
+	@d=$$(mktemp -d); cp -r $(EXT)/. $$d/; rm -f $$d/schemas/gschemas.compiled; \
+		python3 scripts/eltob-setup.py render --template $$d/stylesheet.tpl.css --out $$d/stylesheet.css --title "Celular" && rm $$d/stylesheet.tpl.css; \
+		rm -f $(UUID).shell-extension.zip; (cd $$d && zip -qr -FS "$(CURDIR)/$(UUID).shell-extension.zip" .); rm -rf $$d
 	@echo "Pacote: $(UUID).shell-extension.zip"
 
 clean:
-	@rm -f $(UUID).shell-extension.zip
-	@rm -f $(EXT)/schemas/gschemas.compiled
+	@rm -f $(UUID).shell-extension.zip $(EXT)/stylesheet.css $(EXT)/schemas/gschemas.compiled
 	@find . -name '__pycache__' -type d -prune -exec rm -rf {} +

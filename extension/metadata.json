@@ -2,7 +2,7 @@
   "uuid": "celular@eltobsjr.gmail.com",
   "name": "Celular",
   "description": "Tela do celular Android no PC via Wi-Fi (scrcpy): cartão com bateria e rede, ações rápidas, envio de arquivos, apps em janela e diagnóstico de conexão, com pareamento por QR code.",
-  "version-name": "0.2.0",
+  "version-name": "0.3.0",
   "shell-version": [
     "46",
     "47",
@@ -10,6 +10,7 @@
     "49",
     "50"
   ],
+  "url": "https://github.com/eltobsjr/celular-indicator",
   "settings-schema": "org.gnome.shell.extensions.celular",
   "session-modes": [
     "user",

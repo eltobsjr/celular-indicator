@@ -312,6 +312,7 @@ def find_device(last, want=None, timeout=SEARCH_TIMEOUT, ip_hint=None):
     end = time.monotonic() + timeout
     tried, addr_name, name_addr = set(), {}, {}
     last_code, saw_services, direct_tried, disconnected = None, False, False, set()
+    started, restarted = time.monotonic(), False
     while True:
         devs = list_devices()
         on = lib.online(devs)
@@ -336,6 +337,14 @@ def find_device(last, want=None, timeout=SEARCH_TIMEOUT, ip_hint=None):
         services = lib.parse_mdns(lib.adb("mdns", "services", timeout=5).out)
         connects = [s for s in services if s[1].startswith("_adb-tls-connect")]
         saw_services = saw_services or bool(connects)
+        if not connects and not saw_services and not restarted and time.monotonic() - started > 6:
+            # seis segundos sem NENHUM serviço mDNS: o servidor adb pode estar preso à rede antiga
+            restarted = True
+            if lib.adb_restart_allowed() and lib.adb_restart_safe():
+                LOG.write("mDNS sem serviços: reiniciando o servidor adb uma vez")
+                lib.note_adb_restart()
+                lib.adb("kill-server", timeout=8)
+                lib.adb("start-server", timeout=20)
         mine = [s for s in connects if lib.mdns_instance_matches(s[0], last)
                 or (ip_hint and s[2].startswith(ip_hint + ":"))]
         for name, _kind, addr in (mine or connects):
@@ -451,6 +460,22 @@ def check_tools():
     return None, ver
 
 
+def refresh_adb_server(nets=None, force=False):
+    """`adb start-server`, reiniciando antes se o PC mudou de rede desde a última vez."""
+    fp = lib.net_fingerprint(nets)
+    if force or lib.adb_server_stale(fp):
+        if lib.adb_restart_safe():
+            LOG.write(f"rede mudou ({fp}): reiniciando o servidor adb")
+            lib.note_adb_restart()
+            lib.adb("kill-server", timeout=8)
+        else:
+            LOG.write(f"rede mudou ({fp}), mas há aparelho online no adb: servidor mantido")
+    res = lib.adb("start-server", timeout=20)
+    if res.ok:
+        lib.remember_adb_net(fp)
+    return res, fp
+
+
 def pc_network():
     nets = lib.local_networks()
     lans = lib.lan_networks(nets)
@@ -479,7 +504,7 @@ def connect_flow(a, last):
     step(1, "ok", "PC na rede " + ", ".join(str(n.network) for _, n in lans[:2]))
 
     step(2, "run")
-    res = lib.adb("start-server", timeout=20)
+    res, net_fp = refresh_adb_server(nets)
     code = lib.classify_server(res)
     if code:
         step(2, "fail")
@@ -500,7 +525,7 @@ def connect_flow(a, last):
             if last is None and not a.no_auto_pair:
                 a.pair = True  # nunca pareou: vai direto para o QR code
             else:
-                diag, details = lib.diagnose_unreachable(last, nets)
+                diag, details = lib.diagnose_unreachable(last, nets, fp=net_fp)
                 if diag == "phone_not_found" and code:
                     diag = code
                 step(3, "fail")
@@ -525,7 +550,7 @@ def connect_flow(a, last):
     step(4, "run")
     emit_state("connecting", "Conectando…")
     info = lib.device_info(serial) or {}
-    rec = {"serial": serial, "connected_at": int(time.time()), "online": True}
+    rec = {"serial": serial, "connected_at": int(time.time()), "online": True, "net": net_fp}
     if addr:
         rec["addr"] = addr
     elif ":" in serial:
@@ -946,6 +971,51 @@ def cmd_watch(a):
     return 0
 
 
+# ----------------------------------------------------------------- presença
+
+
+def cmd_presence(a):
+    """Sonda leve: o celular está na rede e acessível? Não abre scrcpy.
+
+    A extensão chama isto quando a rede muda, o PC acorda ou o menu abre com o celular
+    offline. Se o PC trocou de rede, reinicia o servidor adb (o mDNS dele não acompanha)."""
+    install_handlers()
+    last = lib.load_device()
+
+    def done(online, code=None, **extra):
+        emit({"event": "presence", "online": online, "code": code, **extra})
+        return 0
+
+    if not last:
+        return done(False, "never_paired")
+    code, nets, lans = pc_network()
+    if code:
+        return done(False, code)
+    res, net_fp = refresh_adb_server(nets)
+    code = lib.classify_server(res)
+    if code:
+        return done(False, code)
+    serial, name, addr, code, _saw = find_device(last, a.serial, timeout=a.search_timeout)
+    if serial:
+        update = {"serial": serial, "online": True, "last_seen": int(time.time()), "net": net_fp}
+        if addr:
+            update["addr"] = addr
+            update["port"] = lib.split_addr(addr)[1]
+        if name and not name.startswith("_"):
+            update["mdns_name"] = name
+        rec = lib.save_device(update)
+        emit({"event": "device", "device": rec})
+        return done(True)
+    diag, details = lib.diagnose_unreachable(last, nets, fp=net_fp)
+    if diag == "phone_not_found" and code:
+        diag = code
+    try:
+        lib.save_device({"online": False})
+    except OSError:
+        pass
+    return done(False, diag, details=details)
+
+
 # ----------------------------------------------------------------- diagnóstico
 
 
@@ -1054,6 +1124,9 @@ def build_parser():
     act.add_argument("--dest")
     act.add_argument("files", nargs="*")
     sub.add_parser("diagnose")
+    pr = sub.add_parser("presence")
+    pr.add_argument("--serial")
+    pr.add_argument("--search-timeout", type=int, default=10)
     w = sub.add_parser("watch")
     w.add_argument("--serial")
     return p
@@ -1079,6 +1152,8 @@ def main(argv):
             return cmd_diagnose(a)
         if a.cmd == "watch":
             return cmd_watch(a)
+        if a.cmd == "presence":
+            return cmd_presence(a)
         return 2
     except Stopped as e:
         LOG.write(f"encerrado: {e}", sync=True)

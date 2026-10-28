@@ -25,12 +25,21 @@ python3 -c "import venv, ensurepip" 2>/dev/null ||
 command -v zenity >/dev/null 2>&1 ||
     echo "AVISO: zenity não encontrado — «Enviar arquivos» precisa dele (sudo dnf install zenity)."
 
+# 0) tema e opções: pergunta no terminal (use --yes para aceitar os padrões e
+#    --reconfigure para perguntar de novo; também aceita --palette, --accent, --system-accent)
+command -v python3 >/dev/null 2>&1 || { echo "ERRO: python3 não encontrado. Instale com: sudo dnf install python3" >&2; exit 1; }
+SETUP="$ROOT/scripts/eltob-setup.py"
+ANSWERS="$(mktemp)"
+trap 'rm -f "$ANSWERS"' EXIT
+python3 "$SETUP" ask --uuid "$UUID" --options "$ROOT/scripts/options.json" \
+    --schema-dir "$ROOT/extension/schemas" --answers "$ANSWERS" "$@"
+
 # 2) extensão: monta numa pasta temporária ao lado e troca de uma vez (o Shell nunca
 #    vê uma extensão pela metade)
 echo "==> Copiando extensão para $EXT_DEST"
 mkdir -p "$EXT_BASE"
 STAGE="$(mktemp -d "$EXT_BASE/.$UUID.XXXXXX")"
-cleanup() { rm -rf "$STAGE" "${OLD:-}" "${TMP:-}"; }
+cleanup() { rm -rf "$STAGE" "${OLD:-}" "${TMP:-}" "$ANSWERS"; }
 trap cleanup EXIT
 cp -r "$ROOT/extension/." "$STAGE/"
 glib-compile-schemas --strict "$STAGE/schemas"
@@ -40,6 +49,10 @@ if [ -d "$EXT_DEST" ]; then
     mv "$EXT_DEST" "$OLD"
 fi
 mv "$STAGE" "$EXT_DEST"
+
+echo "==> Aplicando tema e opções"
+python3 "$SETUP" apply --uuid "$UUID" --answers "$ANSWERS" --dest "$EXT_DEST" \
+    --options "$ROOT/scripts/options.json" --schema "org.gnome.shell.extensions.celular" --title "Celular"
 
 # 3) backend
 echo "==> Instalando backend em $DATA/bin"
