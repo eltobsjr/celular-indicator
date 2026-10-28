@@ -1,6 +1,6 @@
 /* ---- cores de estado (ícone do painel, pílula, passos) ---- */
 .cel-on { color: {{green}}; }
-.cel-off { color: {{overlay1}}; }
+.cel-off { color: {{subtext0}}; }
 .cel-pending { color: {{yellow}}; }
 .cel-error { color: {{red}}; }
 
@@ -14,12 +14,12 @@
     height: 42px;
     border-radius: 12px;
     background-color: rgba({{accent.rgb}}, 0.16);
-    color: {{accent}};
+    color: {{accent_text}};
 }
 
 .cel-card-name { font-weight: 800; font-size: 1.08em; color: {{text}}; }
 .cel-card-sub { font-size: 0.82em; color: {{subtext0}}; }
-.cel-card-seen { font-size: 0.76em; color: {{overlay1}}; }
+.cel-card-seen { font-size: 0.76em; color: {{subtext0}}; }
 
 .cel-pill {
     font-size: 0.72em;
@@ -71,9 +71,9 @@
     background-color: rgba({{overlay1.rgb}}, 0.18);
     color: {{subtext0}};
 }
-.cel-step-num-accent { background-color: rgba({{accent.rgb}}, 0.2); color: {{accent}}; }
+.cel-step-num-accent { background-color: rgba({{accent.rgb}}, 0.2); color: {{text}}; }
 .cel-step-label { font-size: 0.86em; color: {{subtext0}}; }
-.cel-step-icon { color: {{overlay1}}; }
+.cel-step-icon { color: {{subtext0}}; }
 .cel-step-ok .cel-step-icon { color: {{green}}; }
 .cel-step-ok .cel-step-label { color: {{text}}; }
 .cel-step-run .cel-step-icon { color: {{yellow}}; }
@@ -89,7 +89,7 @@
 }
 .cel-error-title { font-weight: 700; color: {{red}}; }
 .cel-error-hint { font-size: 0.86em; color: {{text}}; }
-.cel-error-detail { font-size: 0.76em; color: {{overlay1}}; }
+.cel-error-detail { font-size: 0.76em; color: {{subtext0}}; }
 
 .cel-btn-row { spacing: 6px; }
 .cel-btn {
@@ -102,7 +102,7 @@
 .cel-btn:hover { background-color: {{surface1}}; }
 .cel-btn:focus { box-shadow: inset 0 0 0 2px {{accent}}; }
 
-.cel-note { font-size: 0.78em; color: {{overlay1}}; }
+.cel-note { font-size: 0.78em; color: {{subtext0}}; }
 
 /* ---- painel de pareamento ---- */
 .cel-pair-item { padding: 0; }
@@ -112,11 +112,11 @@
     padding: 8px;
     border-radius: 12px;
     background-color: rgba({{accent.rgb}}, 0.16);
-    color: {{accent}};
+    color: {{accent_text}};
 }
 .cel-pair-title { font-weight: 800; font-size: 1.05em; color: {{text}}; }
 .cel-pair-sub { font-size: 0.8em; color: {{subtext0}}; }
-.cel-pair-close { padding: 4px; border-radius: 100px; color: {{overlay1}}; }
+.cel-pair-close { padding: 4px; border-radius: 100px; color: {{subtext0}}; }
 .cel-pair-close:hover { background-color: {{surface0}}; color: {{text}}; }
 .cel-pair-close:focus { box-shadow: inset 0 0 0 2px {{accent}}; }
 
@@ -164,7 +164,7 @@
     letter-spacing: 5px;
     color: {{text}};
     background-color: {{mantle}};
-    caret-color: {{accent}};
+    caret-color: {{accent_text}};
     selection-background-color: {{accent}};
     selected-color: {{accent_ink}};
 }
@@ -176,16 +176,16 @@
     font-size: 0.92em;
     color: {{text}};
     background-color: {{mantle}};
-    caret-color: {{accent}};
+    caret-color: {{accent_text}};
 }
 .cel-addr-entry:focus { border-color: {{accent}}; }
 .cel-code-entry StLabel.hint-text, .cel-addr-entry StLabel.hint-text { color: {{surface2}}; }
-.cel-link { font-size: 0.8em; color: {{accent}}; padding: 0 2px; }
+.cel-link { font-size: 0.8em; color: {{accent_text}}; padding: 0 2px; }
 .cel-link:hover { color: {{lavender}}; }
 .cel-link:focus { text-decoration: underline; }
 .cel-form-error { font-size: 0.82em; color: {{red}}; }
 .cel-pair-go { margin-top: 2px; }
-.cel-pair-go:insensitive { background-color: {{surface0}}; color: {{overlay1}}; }
+.cel-pair-go:insensitive { background-color: {{surface0}}; color: {{subtext0}}; }
 .cel-pair-cancel { padding: 8px 12px; border-radius: 12px; font-weight: 700; }
 
 /* ---- ações rápidas ---- */
@@ -203,7 +203,7 @@
 .cel-action-label { font-size: 0.68em; color: {{subtext0}}; margin-top: 2px; }
 
 /* ---- listas (notificações / apps) ---- */
-.cel-muted { color: {{overlay1}}; font-style: italic; }
+.cel-muted { color: {{subtext0}}; font-style: italic; }
 .cel-notif { padding: 4px 14px; }
 .cel-notif-title { font-weight: 700; font-size: 0.86em; color: {{text}}; }
 .cel-notif-text { font-size: 0.82em; color: {{subtext0}}; }
